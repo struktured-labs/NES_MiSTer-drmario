@@ -2432,7 +2432,7 @@ wire [1023:0] me;
 // Second free-running 6502 + 64KB firmware BRAM; game writes board+GO, polls DONE, reads move.
 wire [7:0] copro_dout;
 wire       copro_sel;
-CoproDrMario copro(
+CoproDrMario #(.WIN(7'b0101_000)) copro(   // player 1: window $5000-$51FF
 	.clk      (clk),
 	.ce       (ce),
 	.enable   (me[100]),
@@ -2442,6 +2442,20 @@ CoproDrMario copro(
 	.prg_din  (prg_din),
 	.prg_dout (copro_dout),
 	.copro_sel(copro_sel)
+);
+// Second AI coprocessor (one per player, so no time-sharing): window $5200-$53FF.
+wire [7:0] copro2_dout;
+wire       copro2_sel;
+CoproDrMario #(.WIN(7'b0101_001)) copro2(
+	.clk      (clk),
+	.ce       (ce),
+	.enable   (me[100]),
+	.prg_ain  (prg_ain),
+	.prg_read (prg_read),
+	.prg_write(prg_write),
+	.prg_din  (prg_din),
+	.prg_dout (copro2_dout),
+	.copro_sel(copro2_sel)
 );
 
 always @* begin
@@ -2466,9 +2480,13 @@ always @* begin
 	prg_bus_write   = flags_out_b[1];
 	prg_conflict    = flags_out_b[2];
 
-	// Dr. Mario coprocessor window ($5000-$51FF, mapper 100): drive reads from the copro bridge
-	if (copro_sel & prg_read) begin
+	// Dr. Mario coprocessor windows (mapper 100): drive reads from the copro bridges
+	if (copro_sel & prg_read) begin        // copro1 $5000-$51FF (player 1)
 		prg_dout      = copro_dout;
+		prg_bus_write = 1'b1;
+	end
+	if (copro2_sel & prg_read) begin       // copro2 $5200-$53FF (player 2)
+		prg_dout      = copro2_dout;
 		prg_bus_write = 1'b1;
 	end
 	has_savestate   = flags_out_b[3];

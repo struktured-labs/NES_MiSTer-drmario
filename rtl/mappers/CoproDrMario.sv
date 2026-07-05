@@ -1,3 +1,4 @@
+// rebuild-tag: full-d2 firmware (atomic, setup-on) 2026-07-05
 // Dr. Mario depth-2 AI coprocessor (mapper 100 = MMC1 banking + this block).
 // A second 6502 (Arlet core, renamed copro6502) free-runs at the core master clock
 // (~85.9 MHz vs the game CPU's 1.79 MHz) computing the depth-2 pill placement.
@@ -18,7 +19,7 @@
 //
 // Proven in simulation (fpga/copro in dr-mario-mods): handshake 6/6 vs the py65 machine,
 // 13-23M copro clocks per pill -> ~0.15-0.35s at 85.9MHz.
-module CoproDrMario(
+module CoproDrMario #(parameter [6:0] WIN = 7'b0101_000) (   // WIN = prg_ain[15:9] window select
 	input         clk,        // core master clock (copro runs on this, no CE)
 	input         ce,         // M2 (game-CPU cycle enable) for host-side sampling
 	input         enable,     // me[100]
@@ -27,10 +28,10 @@ module CoproDrMario(
 	input         prg_write,
 	input   [7:0] prg_din,
 	output  [7:0] prg_dout,   // valid when copro_sel && prg_read (cart_top overrides)
-	output        copro_sel   // host window hit ($5000-$51FF)
+	output        copro_sel   // host window hit (WIN: copro1=$5000-$51FF, copro2=$5200-$53FF)
 );
 
-assign copro_sel = enable && (prg_ain[15:9] == 7'b0101_000);   // $5000-$51FF
+assign copro_sel = enable && (prg_ain[15:9] == WIN);   // window-relative offset = prg_ain[8:0]
 
 // ------------------------------------------------------------------ coprocessor CPU
 wire [15:0] AB;
