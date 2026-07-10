@@ -17,6 +17,7 @@
 
 module cart_top (
 	input             clk,
+	input             clk85,          // fast clock for the Dr.Mario coprocessors
 	input             ce,             // M2
 	input             cpu_ce,         // CPU Phi1 clock (several mappers use m2 inverted)
 	input             paused,         // This indicates the core is paused so anything using the master clock won't get messed up
@@ -2434,6 +2435,7 @@ wire [7:0] copro_dout;
 wire       copro_sel;
 CoproDrMario #(.WIN(7'b0101_000)) copro(   // player 1: window $5000-$51FF
 	.clk      (clk),
+	.clk_cpu  (clk85),
 	.ce       (ce),
 	.enable   (me[100]),
 	.prg_ain  (prg_ain),
@@ -2448,6 +2450,7 @@ wire [7:0] copro2_dout;
 wire       copro2_sel;
 CoproDrMario #(.WIN(7'b0101_001)) copro2(
 	.clk      (clk),
+	.clk_cpu  (clk85),
 	.ce       (ce),
 	.enable   (me[100]),
 	.prg_ain  (prg_ain),

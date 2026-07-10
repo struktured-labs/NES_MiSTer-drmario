@@ -719,6 +719,7 @@ wire nes_hblank, nes_hsync, nes_vsync, nes_vblank;
 
 NES nes (
 	.clk             (clk),
+	.clk85           (clk85),
 	.reset_nes       (reset_nes),
 	.ppu_rst_behavior(status[64]),
 	.cold_reset      (downloading & (type_fds | type_nes)),
