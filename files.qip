@@ -1,6 +1,7 @@
 set_global_assignment -name QIP_FILE rtl/t65/t65.qip
 set_global_assignment -name QIP_FILE rtl/mappers/mappers.qip
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mappers/CoproDrMario.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mappers/LeafEval.sv
 set_global_assignment -name VERILOG_FILE rtl/mappers/copro6502.v
 set_global_assignment -name VERILOG_FILE rtl/mappers/copro_alu.v
 set_global_assignment -name QIP_FILE rtl/SOUND/OPLL/OPLL.qip

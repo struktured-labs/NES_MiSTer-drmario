@@ -1,4 +1,4 @@
-// rebuild-tag: DEPTH-3 full+seeded, copro on clk85 (4x clock-domain fix) 2026-07-10e
+// rebuild-tag: BoardEngine dpram-slots (fit fix) 2026-07-11e
 // Dr. Mario depth-2 AI coprocessor (mapper 100 = MMC1 banking + this block).
 // A second 6502 (Arlet core, renamed copro6502) free-runs at the core master clock
 // (~85.9 MHz vs the game CPU's 1.79 MHz) computing the depth-2 pill placement.
@@ -57,7 +57,76 @@ wire        a_ram_st = (AB[15:8]  == 8'h61);         // $6100-$61FF
 wire        a_ram    = a_ram_lo | a_ram_st;
 wire        a_rom    = (AB[15:14] == 2'b10);         // $8000-$BFFF
 wire        a_vec    = (AB[15:1]  == 15'h7FFE);      // $FFFC/$FFFD
+wire        a_lev    = (AB[15:8]  == 8'h70);         // $7000-$70FF: LeafEval accelerator
 wire [11:0] a_addr   = a_ram_st ? {4'h8, AB[7:0]} : AB[11:0];
+
+// ---------------------------------------------------------- LeafEval/BoardEngine
+// $7000-$707F W: board bytes into slot `wslot` (NES encoding -> 3-bit cells)
+// $70E0-$70E4 W: args o4/col/ca/cb/slot ; $70F3 W: wslot ; $70F4 W: command (pulse)
+// $70F8 W: legacy LEAF start. Reads: $70F0/1 sco, $70F2 win, $70E8 legal,
+// $70E9/EA rv_cells/vir, $70EB/EC imm, $70F8 done.
+wire       lev_wr_board = WE && !cpu_rst && a_lev && !AB[7];
+wire       lev_start    = WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF8);
+wire       lev_cmd_go   = WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF4);
+wire       lev_wr_arg   = WE && !cpu_rst && a_lev && (AB[7:4] == 4'hE) && !AB[3];
+wire [2:0] lev_enc = (DO == 8'hFF) ? 3'd0
+                   : {(DO[7:4] == 4'hD), (DO[1:0] == 2'd0) ? 2'd1
+                                        : (DO[1:0] == 2'd1) ? 2'd2 : 2'd3};
+wire [1:0] lev_colenc = (DO[1:0] == 2'd0) ? 2'd1 : (DO[1:0] == 2'd1) ? 2'd2 : 2'd3;
+reg  [1:0] lev_wslot;
+reg  [1:0] lev_a_o4, lev_a_sl, lev_a_ca, lev_a_cb;
+reg  [2:0] lev_a_col;
+always @(posedge clk_cpu) begin
+	if (WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF3)) lev_wslot <= DO[1:0];
+	if (lev_wr_arg)
+		case (AB[2:0])
+			3'd0: lev_a_o4  <= DO[1:0];
+			3'd1: lev_a_col <= DO[2:0];
+			3'd2: lev_a_ca  <= lev_colenc;
+			3'd3: lev_a_cb  <= lev_colenc;
+			default: lev_a_sl <= DO[1:0];
+		endcase
+end
+wire        lev_done, lev_win, lev_legal;
+wire [15:0] lev_sco, lev_imm;
+wire  [5:0] lev_rvc;
+wire  [3:0] lev_rvv;
+LeafEval leafeval(
+	.clk   (clk_cpu),
+	.rst   (cpu_rst),
+	.wr    (lev_wr_board),
+	.waddr (AB[6:0]),
+	.wdata (lev_enc),
+	.wslot (lev_wslot),
+	.start (lev_start),
+	.cmd   (DO[3:0]),
+	.cmd_go(lev_cmd_go),
+	.a_sl  (lev_a_sl),
+	.a_o4  (lev_a_o4),
+	.a_col (lev_a_col),
+	.a_ca  (lev_a_ca),
+	.a_cb  (lev_a_cb),
+	.done  (lev_done),
+	.sco   (lev_sco),
+	.win   (lev_win),
+	.legal (lev_legal),
+	.rv_cells(lev_rvc),
+	.rv_vir(lev_rvv),
+	.imm   (lev_imm)
+);
+reg [7:0] lev_q;
+always @(posedge clk_cpu)
+	case (AB[3:0])
+		4'h0: lev_q <= lev_sco[7:0];
+		4'h1: lev_q <= lev_sco[15:8];
+		4'h2: lev_q <= {7'b0, lev_win};
+		4'h8: lev_q <= (AB[7:4] == 4'hE) ? {7'b0, lev_legal} : {7'b0, lev_done};
+		4'h9: lev_q <= {2'b0, lev_rvc};
+		4'hA: lev_q <= {4'b0, lev_rvv};
+		4'hB: lev_q <= lev_imm[7:0];
+		4'hC: lev_q <= lev_imm[15:8];
+		default: lev_q <= {7'b0, lev_done};
+	endcase
 
 // ------------------------------------------------------------------ 16KB firmware ROM (copro-only)
 reg [7:0] rom [0:16383];
@@ -85,12 +154,13 @@ dpram #(.widthad_a(12), .width_a(8)) wram (
 );
 
 // registered DI mux (data + selects all registered -> DI valid 1 cycle after AB, as Arlet expects)
-reg sel_ram_d, sel_rom_d, sel_vec_d, ab0_d;
+reg sel_ram_d, sel_rom_d, sel_vec_d, sel_lev_d, ab0_d;
 always @(posedge clk_cpu) begin
-	sel_ram_d <= a_ram; sel_rom_d <= a_rom; sel_vec_d <= a_vec; ab0_d <= AB[0];
+	sel_ram_d <= a_ram; sel_rom_d <= a_rom; sel_vec_d <= a_vec; sel_lev_d <= a_lev; ab0_d <= AB[0];
 end
 assign DI = sel_vec_d ? (ab0_d ? 8'hBF : 8'h80) :
             sel_rom_d ? rom_q :
+            sel_lev_d ? lev_q :
             sel_ram_d ? ram_a_q : 8'hFF;
 
 // ------------------------------------------------------------------ host bridge (port B control)
