@@ -2429,23 +2429,10 @@ vrc6_mixed snd_vrc6 (
 
 wire [1023:0] me;
 
-// Dr. Mario depth-2 AI coprocessor (mapper 100 = MMC1 + this block at $5000-$51FF).
-// Second free-running 6502 + 64KB firmware BRAM; game writes board+GO, polls DONE, reads move.
-wire [7:0] copro_dout;
-wire       copro_sel;
-CoproDrMario #(.WIN(7'b0101_000)) copro(   // player 1: window $5000-$51FF
-	.clk      (clk),
-	.clk_cpu  (clk85),
-	.ce       (ce),
-	.enable   (me[100]),
-	.prg_ain  (prg_ain),
-	.prg_read (prg_read),
-	.prg_write(prg_write),
-	.prg_din  (prg_din),
-	.prg_dout (copro_dout),
-	.copro_sel(copro_sel)
-);
-// Second AI coprocessor (one per player, so no time-sharing): window $5200-$53FF.
+// Dr. Mario AI coprocessor (mapper 100 = MMC1 + this block). Second free-running 6502 +
+// 64KB firmware BRAM; game writes board+GO, polls DONE, reads move.
+// WINNER SINGLE-COPRO STRIP (claude/winner-single-copro): the P1 copro ($5000-$51FF) is
+// removed to fit the DE10; only the P2 copro ($5200-$53FF) remains.
 wire [7:0] copro2_dout;
 wire       copro2_sel;
 CoproDrMario #(.WIN(7'b0101_001)) copro2(
@@ -2483,11 +2470,8 @@ always @* begin
 	prg_bus_write   = flags_out_b[1];
 	prg_conflict    = flags_out_b[2];
 
-	// Dr. Mario coprocessor windows (mapper 100): drive reads from the copro bridges
-	if (copro_sel & prg_read) begin        // copro1 $5000-$51FF (player 1)
-		prg_dout      = copro_dout;
-		prg_bus_write = 1'b1;
-	end
+	// Dr. Mario coprocessor window (mapper 100): drive reads from the P2 copro bridge
+	// (P1 copro stripped in the winner single-copro build).
 	if (copro2_sel & prg_read) begin       // copro2 $5200-$53FF (player 2)
 		prg_dout      = copro2_dout;
 		prg_bus_write = 1'b1;
