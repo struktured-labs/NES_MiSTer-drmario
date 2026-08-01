@@ -88,8 +88,24 @@ reg  [1:0] lev_wslot;
 reg  [1:0] lev_a_o4, lev_a_sl, lev_a_ca, lev_a_cb;
 reg  [2:0] lev_a_col;
 // The two ARM-SELECT bytes. Both power up to the no-op value, so firmware that writes
-// neither behaves exactly as the pre-link engine's successor (lnk1, no chain reward), and
-// switching arms on hardware is a firmware hex patch -- NOT a two-hour resynthesis.
+// neither behaves exactly as the pre-link engine's successor (lnk1, no chain reward).
+//
+// COST OF SWITCHING ARMS -- an earlier version of this comment claimed switching was "a
+// firmware hex patch, NOT a two-hour resynthesis". THAT IS FALSE. It was never measured,
+// and it was quoted as the cost basis for a planning decision before the experiment caught
+// it, which is exactly what aspirational prose in a source file costs.
+//
+// The firmware ROM below is $readmemh-initialised, and Quartus resolves that at SYNTHESIS.
+// `quartus_cdb --update_mif` therefore has nothing to update: it exits 0 and quartus_asm
+// re-emits the SAME bitstream. MEASURED -- three differently-labelled arms produced one
+// identical rbf (f7d3382a). So EACH ARM COSTS A FULL COMPILE, ~40 minutes, and any menu or
+// matrix built on these bytes must be priced per-arm-per-build, not per-byte.
+//
+// The bytes still earn their place: the arm stays out of the RTL, so switching needs no
+// source edit, and a same-placement A/B is available by pinning the fitter seed. But that
+// is established by REPRODUCTION -- matching slack across builds -- not by patching.
+// See experiments/rtl_chain/swap_arm.sh (kept, disabled, measurement in its header) and the
+// shipped recipe under experiments/rtl_chain/ship/stomper180-seed2/.
 reg        lev_a_fix = 1'b0;   // $70E5: 0 = one clear round (lnk1), 1 = resolve to fixpoint
 reg  [7:0] lev_a_chw = 8'd0;   // $70E6: DRCHAIN dose / 4 (0 = no chain reward)
 always @(posedge clk_cpu) begin
