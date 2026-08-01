@@ -133,8 +133,18 @@ localparam S_DPOL=31, S_DNEW=32, S_DBUR=33, S_DADV=34, S_DRV=35,
            S_DRVFIN=36, S_DSETH=37, S_DUNPL=38, S_DSETV=39, S_DCOMB=40;
 // body gravity + fixpoint re-scan. S_GRAV keeps its number: it is now the bottom-up
 // body sweep instead of the old per-column compaction.
-localparam S_GRAV2=41,          // second cell of a two-cell body
-           S_FPREP=42;          // clear the mark plane, arm the 24-line full scan
+localparam S_GRAV2=41,          // second cell of a two-cell body: READ
+           S_FPREP=42,          // clear the mark plane, arm the 24-line full scan
+// TIMING SPLIT. `blink` is a 128-entry register file, so a blink READ is a 128:1 mux and a
+// blink WRITE is a 128-way decode. Doing both in one cycle put mux -> decision logic ->
+// decode on a single path: MEASURED 14.16 ns against an 11.64 ns requirement on the copro
+// clock (worst setup paths were literally blink[92] -> blink[88]), turning the baseline's
+// +0.118 ns margin into -3.241. Each sweep is therefore split into a READ/DECIDE cycle
+// that ends at a register and a WRITE cycle whose operands are all registers. Costs 2x
+// cycles in the apply and gravity sweeps -- both clearing-path only.
+           S_APPLY2=43,         // apply sweep: WRITE
+           S_GRAV_M=44,         // gravity: WRITE first cell
+           S_GRAV2M=45;         // gravity: WRITE partner cell
 // link codes -- "which way the partner lies" (cascade_link_x.py)
 localparam [2:0] LK_NONE=3'd0, LK_UP=3'd1, LK_DOWN=3'd2, LK_LEFT=3'd3, LK_RIGHT=3'd4;
 reg [3:0] cmd_l;
@@ -158,6 +168,13 @@ reg [3:0]   gr;                // sweep row 14..0 (row 15 can never fall)
 reg [2:0]   gc;                // sweep col 0..7
 reg         gmoved;            // a body moved this pass -> another pass is due
 reg [6:0]   gk1;               // partner cell queued for its own move cycle
+// READ/DECIDE -> WRITE pipeline registers (see the S_GRAV_M / S_APPLY2 timing note)
+reg         g_do, g_has;       // this body falls / it has a second cell
+reg [6:0]   g_k0, g_k1;
+reg [2:0]   g_cell, g_lnk;     // the cell being moved, captured before it is cleared
+reg         ap_m, ap_vir;      // apply sweep: marked / was a virus
+reg [2:0]   ap_lk;
+reg [6:0]   ap_i;
 // ---- full-board re-scan (chain rounds 2+) ----
 // Round 1 needs only the 4 lines through the placed cells: a settled parent has no run
 // >= 4 anywhere else. After gravity the surviving cells have moved arbitrarily, so
@@ -394,43 +411,53 @@ always @(posedge clk) begin
 			endcase
 		end
 
-		S_APPLY: begin : apl
-			// Clearing a cell also BREAKS THE LINK of a surviving partner: that partner
-			// becomes a loose single and will fall on its own. Both halves marked -> no
-			// unlink needed, they are both about to be blanked.
-			reg [2:0] lk;
+		// apply sweep, stage 1: READ ONLY. The blink read mux ends at a register here so
+		// that it never feeds the blink write decode in the same cycle.
+		S_APPLY: begin
+			ap_m   <= markb[fwp2];
+			ap_lk  <= blink[fwp2];
+			ap_vir <= vir_of[fwp2];
+			ap_i   <= fwp2;
+			st <= S_APPLY2;
+		end
+		// apply sweep, stage 2: WRITE, operands all registered.
+		// Clearing a cell also BREAKS THE LINK of a surviving partner: that partner
+		// becomes a loose single and falls on its own. If both halves are marked no
+		// unlink is needed -- they are both about to be blanked.
+		S_APPLY2: begin : apl
 			reg       phas;
 			reg [6:0] pix;
-			lk   = blink[fwp2];
-			phas = (lk == LK_UP    && fwp2[6:3] != 4'd0)
-			    || (lk == LK_DOWN  && fwp2[6:3] != 4'd15)
-			    || (lk == LK_LEFT  && fwp2[2:0] != 3'd0)
-			    || (lk == LK_RIGHT && fwp2[2:0] != 3'd7);
-			pix  = (lk == LK_UP)   ? fwp2 - 7'd8
-			     : (lk == LK_DOWN) ? fwp2 + 7'd8
-			     : (lk == LK_LEFT) ? fwp2 - 7'd1
-			     :                   fwp2 + 7'd1;
-			if (markb[fwp2]) begin
+			phas = (ap_lk == LK_UP    && ap_i[6:3] != 4'd0)
+			    || (ap_lk == LK_DOWN  && ap_i[6:3] != 4'd15)
+			    || (ap_lk == LK_LEFT  && ap_i[2:0] != 3'd0)
+			    || (ap_lk == LK_RIGHT && ap_i[2:0] != 3'd7);
+			pix  = (ap_lk == LK_UP)   ? ap_i - 7'd8
+			     : (ap_lk == LK_DOWN) ? ap_i + 7'd8
+			     : (ap_lk == LK_LEFT) ? ap_i - 7'd1
+			     :                      ap_i + 7'd1;
+			if (ap_m) begin
 				rv_cells <= rv_cells + 1'b1;
-				if (vir_of[fwp2]) rv_vir <= rv_vir + 1'b1;
-				bcell[fwp2] <= 3'd0;
-				blink[fwp2] <= LK_NONE;
+				if (ap_vir) rv_vir <= rv_vir + 1'b1;
+				bcell[ap_i] <= 3'd0;
+				blink[ap_i] <= LK_NONE;
 				if (phas && !markb[pix]) blink[pix] <= LK_NONE;
 				anyclear <= 1'b1;
 			end
-			if (fwp2 == 7'd127) begin
+			if (ap_i == 7'd127) begin
 				gr <= 4'd14; gc <= 3'd0; gmoved <= 1'b0;   // arm the body-gravity sweep
 				if (delta_mode) begin
-					if (anyclear || markb[7'd127]) begin      // clearing placement -> host does full NODE
+					if (anyclear || ap_m) begin               // clearing placement -> host does full NODE
 						dv_fallback <= 1'b1; done <= 1'b1; delta_mode <= 1'b0; st <= S_IDLE;
 					end else st <= S_DNEW;                     // non-clearing: child in CUR, run delta scans
-				end else if (anyclear || markb[7'd127]) begin
+				end else if (anyclear || ap_m) begin
 					if (chain != 4'd15) chain <= chain + 1'b1;
 					st <= S_GRAV;
 				end else
 					st <= S_RESDONE;                           // rescan found nothing: settled
-			end else
+			end else begin
 				fwp2 <= fwp2 + 1'b1;
+				st <= S_APPLY;
+			end
 		end
 
 		// ---- BODY gravity: bottom-up sweep, repeated until a pass moves nothing ----
@@ -462,30 +489,45 @@ always @(posedge clk) begin
 			blk = occ_of[k0 + 7'd8];
 			if (haspt && occ_of[k1 + 7'd8] && (k1 + 7'd8) != k0) blk = 1'b1;
 			dofall = occ_of[k0] && !vir_of[k0] && isrep && !blk;
-			if (dofall) begin
-				bcell[k0 + 7'd8] <= bcell[k0]; blink[k0 + 7'd8] <= blink[k0];
-				bcell[k0]        <= 3'd0;      blink[k0]        <= LK_NONE;
+			// stage 1 is READ/DECIDE ONLY -- capture the cell before anything is written
+			g_do <= dofall; g_has <= haspt; g_k0 <= k0; g_k1 <= k1;
+			g_cell <= bcell[k0]; g_lnk <= lk;
+			st <= S_GRAV_M;
+		end
+		// gravity stage 2: move the representative cell down one row, from registers.
+		S_GRAV_M: begin
+			if (g_do) begin
+				bcell[g_k0 + 7'd8] <= g_cell; blink[g_k0 + 7'd8] <= g_lnk;
+				bcell[g_k0]        <= 3'd0;   blink[g_k0]        <= LK_NONE;
 				gmoved <= 1'b1;
 			end
-			if (dofall && haspt) begin
-				gk1 <= k1; st <= S_GRAV2;         // second cell moves next cycle
+			if (g_do && g_has) begin
+				gk1 <= g_k1; st <= S_GRAV2;       // partner follows in its own two cycles
 			end else begin
-				// cursor advance + end-of-pass (mirrored in S_GRAV2)
+				// cursor advance + end-of-pass (mirrored in S_GRAV2M).
+				// st is assigned FIRST so the terminal arm below can override it -- the
+				// other order makes the last nonblocking write win and the sweep never ends.
+				st <= S_GRAV;
 				if (gc == 3'd7) begin
 					gc <= 3'd0;
 					if (gr == 4'd0) begin
-						if (gmoved || dofall) begin gr <= 4'd14; gmoved <= 1'b0; end
+						if (gmoved || g_do) begin gr <= 4'd14; gmoved <= 1'b0; end
 						else st <= a_fix ? S_FPREP : S_RESDONE;
 					end else gr <= gr - 1'b1;
 				end else gc <= gc + 1'b1;
 			end
 		end
-		// second cell of a two-cell body. For a vertical pair gk1 + 8 == the cell S_GRAV
-		// just vacated, so this must be its own cycle, not a second write port.
+		// second cell of a two-cell body. For a vertical pair gk1 + 8 == the cell S_GRAV_M
+		// just vacated, so it must follow that write, not share the cycle. Read then write,
+		// same reason as above.
 		S_GRAV2: begin
-			bcell[gk1 + 7'd8] <= bcell[gk1]; blink[gk1 + 7'd8] <= blink[gk1];
-			bcell[gk1]        <= 3'd0;       blink[gk1]        <= LK_NONE;
-			// cursor advance + end-of-pass (gmoved is already 1 from S_GRAV)
+			g_cell <= bcell[gk1]; g_lnk <= blink[gk1];
+			st <= S_GRAV2M;
+		end
+		S_GRAV2M: begin
+			bcell[gk1 + 7'd8] <= g_cell; blink[gk1 + 7'd8] <= g_lnk;
+			bcell[gk1]        <= 3'd0;   blink[gk1]        <= LK_NONE;
+			// cursor advance + end-of-pass (gmoved is already 1 from S_GRAV_M)
 			if (gc == 3'd7) begin
 				gc <= 3'd0;
 				if (gr == 4'd0) begin gr <= 4'd14; gmoved <= 1'b0; end
