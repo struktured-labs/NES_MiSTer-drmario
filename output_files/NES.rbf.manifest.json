@@ -1,0 +1,40 @@
+{
+  "artifact": {
+    "md5": "be266883c5b79759a615220e457fa3af",
+    "name": "NES.rbf",
+    "size": 3561472
+  },
+  "builder": {
+    "argv": [
+      "./run_fit.sh"
+    ],
+    "file": "run_fit.sh",
+    "md5": "3113124a27e71fdd3d5310c6783ca8cc"
+  },
+  "determinism": "not checked (no rebuild callable supplied)",
+  "env": {},
+  "git": {
+    "branch": "claude/winner-single-copro",
+    "commit": "b49876487189d1833e758edf3641b67f11ebf51e",
+    "dirty": true
+  },
+  "inputs": [
+    {
+      "md5": "45e7df6a529f1850af88d37563496a82",
+      "path": "rtl/mappers/CoproDrMario.sv"
+    },
+    {
+      "md5": "751b6ce98faef5a9316b3aa3a53fdf51",
+      "path": "copro_rom.hex"
+    },
+    {
+      "md5": "e72ded56cce66665bd84bb6edc36aea2",
+      "path": "NES.qsf"
+    }
+  ],
+  "notes": {
+    "determinism_note": "second 71-min compile not run; commit b498764 is the recipe",
+    "fit": "87% ALM, worst setup slack +0.118, 0 critical warnings",
+    "purpose": "tuck mailbox RTL + firmware 751b6ce9; pair-latch silicon A/B core"
+  }
+}
