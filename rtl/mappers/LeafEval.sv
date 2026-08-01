@@ -91,7 +91,16 @@ reg [2:0] blink [0:127] /*verilator public_flat_rd*/;
 // timing split below), so each one simply drives bl_ra one state early and reads bl_rq.
 // That is also exactly the shape a BRAM wants, if the plane ever has to move into one.
 reg  [6:0] bl_ra;
-wire [2:0] bl_rq = blink[bl_ra];
+reg  [2:0] bl_rq;
+// SYNCHRONOUS read + ONE write port == the shape Quartus infers as a RAM, which is the
+// whole point: it moves 128x3 bits out of ALMs and takes the 128-way read mux and write
+// decode with them.
+// The bypass is not decoration. S_APPLY_U un-links a SURVIVING partner, and that partner
+// can be the very cell the sweep reads next (partner at fwp2+1 under LK_RIGHT). A register
+// file shows the new value on the following cycle; a RAM's read-during-write behaviour is
+// inference-dependent, so the forward is explicit rather than trusted.
+always @(posedge clk)
+	bl_rq <= (bl_we && bl_wa == bl_ra) ? bl_wd : blink[bl_ra];
 
 // ---- link-plane WRITE PORTS -------------------------------------------------------
 // Ten separate `blink[<expr>] <=` statements give every one of the 128 registers a
@@ -109,36 +118,27 @@ wire [6:0] ap_pix  = (ap_lk == LK_UP)   ? ap_i - 7'd8
                    : (ap_lk == LK_DOWN) ? ap_i + 7'd8
                    : (ap_lk == LK_LEFT) ? ap_i - 7'd1
                    :                      ap_i + 7'd1;
-reg  [6:0] bl_wa0, bl_wa1;
-reg  [2:0] bl_wd0, bl_wd1;
-reg        bl_we0, bl_we1;
+reg  [6:0] bl_wa;
+reg  [2:0] bl_wd;
+reg        bl_we;
 always @* begin
-	bl_we0 = 1'b0; bl_wa0 = 7'd0; bl_wd0 = LK_NONE;
-	bl_we1 = 1'b0; bl_wa1 = 7'd0; bl_wd1 = LK_NONE;
-	case (st)
-	S_CP_R:  begin bl_we0 = 1'b1; bl_wa0 = fwp2;  bl_wd0 = sl_qb[5:3]; end
-	S_PLACE: begin
-		bl_we0 = 1'b1; bl_wa0 = off_a; bl_wd0 = a_o4[1] ? LK_RIGHT : LK_DOWN;
-		bl_we1 = 1'b1; bl_wa1 = off_b; bl_wd1 = a_o4[1] ? LK_LEFT  : LK_UP;
-	end
-	S_APPLY2: if (ap_m) begin
-		bl_we0 = 1'b1; bl_wa0 = ap_i;   bl_wd0 = LK_NONE;
-		if (ap_unl) begin
-			bl_we1 = 1'b1; bl_wa1 = ap_pixr; bl_wd1 = LK_NONE;
-		end
-	end
-	S_GRAV_M: if (g_do) begin
-		bl_we0 = 1'b1; bl_wa0 = g_k0 + 7'd8; bl_wd0 = g_lnk;
-		bl_we1 = 1'b1; bl_wa1 = g_k0;        bl_wd1 = LK_NONE;
-	end
-	S_GRAV2M: begin
-		bl_we0 = 1'b1; bl_wa0 = gk1 + 7'd8;  bl_wd0 = g_lnk;
-		bl_we1 = 1'b1; bl_wa1 = gk1;         bl_wd1 = LK_NONE;
-	end
-	S_DUNPL: begin
-		bl_we0 = 1'b1; bl_wa0 = off_a; bl_wd0 = LK_NONE;
-		bl_we1 = 1'b1; bl_wa1 = off_b; bl_wd1 = LK_NONE;
-	end
+	bl_we = 1'b0; bl_wa = 7'd0; bl_wd = LK_NONE;
+	// The host window write only ever fires while the FSM is idle, so priority between
+	// the two is moot; giving it first refusal keeps the arms below mutually exclusive.
+	if (wr && wslot == 2'd0) begin
+		bl_we = 1'b1; bl_wa = waddr; bl_wd = wlnk;
+	end else case (st)
+	S_CP_R:     begin bl_we = 1'b1; bl_wa = fwp2;  bl_wd = sl_qb[5:3]; end
+	S_PLACE:    begin bl_we = 1'b1; bl_wa = off_a; bl_wd = a_o4[1] ? LK_RIGHT : LK_DOWN; end
+	S_PLACE_B:  begin bl_we = 1'b1; bl_wa = off_b; bl_wd = a_o4[1] ? LK_LEFT  : LK_UP;  end
+	S_APPLY_U:  if (ap_m && ap_unl) begin bl_we = 1'b1; bl_wa = ap_pixr; bl_wd = LK_NONE; end
+	S_APPLY2:   if (ap_m)           begin bl_we = 1'b1; bl_wa = ap_i;    bl_wd = LK_NONE; end
+	S_GRAV_MA:  if (g_do) begin bl_we = 1'b1; bl_wa = g_k0;        bl_wd = LK_NONE; end
+	S_GRAV_M:   if (g_do) begin bl_we = 1'b1; bl_wa = g_k0 + 7'd8; bl_wd = g_lnk;   end
+	S_GRAV2MA:  begin bl_we = 1'b1; bl_wa = gk1;         bl_wd = LK_NONE; end
+	S_GRAV2M:   begin bl_we = 1'b1; bl_wa = gk1 + 7'd8;  bl_wd = g_lnk;   end
+	S_DUNPL:    begin bl_we = 1'b1; bl_wa = off_a; bl_wd = LK_NONE; end
+	S_DUNPL_B:  begin bl_we = 1'b1; bl_wa = off_b; bl_wd = LK_NONE; end
 	default: ;
 	endcase
 end
@@ -206,6 +206,24 @@ localparam S_GRAV2=41,          // second cell of a two-cell body: READ
 // cycles in the apply and gravity sweeps -- both clearing-path only.
            S_APPLY_P=46,        // apply sweep: RESOLVE the partner (markb lookup)
            S_GRAV_D=47,         // gravity: DECIDE (the k1-indexed blocker lookup)
+// SINGLE-WRITE-PORT serialisation. A RAM has one write port, so the five states that
+// wrote two link words now spread them over two cycles. Each extra state does ONLY the
+// second write, leaving the original state's branch logic untouched -- the alternative,
+// moving branch logic into a new tail state, is where this kind of refactor goes wrong.
+           S_APPLY_U=48,        // apply: un-link the surviving partner
+           S_GRAV_MA=49,        // gravity: vacate the source cell's link
+           S_GRAV2MA=50,        // gravity: vacate the partner's link
+           S_PLACE_B=51,        // place: second half's link
+           S_DUNPL_B=52,        // delta un-place: second cell's link
+// RAM READ LATENCY bubbles. A synchronous read presents its address one cycle and returns
+// data the next, so a consumer needs its address set TWO states earlier, not one. Each
+// consumer gets an explicit idle cycle rather than duplicating the FSM's address
+// arithmetic into a combinational next-address block -- which is exactly where an
+// off-by-one would hide.
+           S_APPLY_W=53,        // wait for blink[fwp2]
+           S_GRAV_W=54,         // wait for blink[cursor]
+           S_GRAV2_W=55,        // wait for blink[gk1]
+           S_CP_W_P=56,         // prime the copy-out walk
            S_APPLY2=43,         // apply sweep: WRITE
            S_GRAV_M=44,         // gravity: WRITE first cell
            S_GRAV2M=45;         // gravity: WRITE partner cell
@@ -326,10 +344,9 @@ always @(posedge clk) begin
 		base_mode <= 1'b0; delta_mode <= 1'b0; dv_fallback <= 1'b0;
 	end else begin
 		if (wr && wslot == 2'd0) begin                    // slot writes go via the dpram port
-			bcell[waddr] <= wdata; blink[waddr] <= wlnk;
+			bcell[waddr] <= wdata;   // its link goes through the write port below
 		end
-		if (bl_we0) blink[bl_wa0] <= bl_wd0;   // link-plane write ports (see the funnel above)
-		if (bl_we1) blink[bl_wa1] <= bl_wd1;
+		if (bl_we) blink[bl_wa] <= bl_wd;      // THE link-plane write port (see funnel above)
 		case (st)
 		S_IDLE: if (start || cmd_go) begin
 			done <= 1'b0;
@@ -376,7 +393,7 @@ always @(posedge clk) begin
 			fwp2 <= 0; cpw_p <= 0; bl_ra <= 7'd0;   // bl_ra tracks cpw_p through the walk
 			sr_addr <= {a_sl, 7'd0};
 			if (cmd_l == 4'd2) st <= S_CP_P;
-			else begin sl_cpw <= 1'b1; st <= S_CP_W; end
+			else begin sl_cpw <= 1'b1; st <= S_CP_W_P; end
 		end
 		S_CP_P: begin                             // prime: cell 0 lands in slotq next cycle
 			sr_addr <= sr_addr + 1'b1;
@@ -391,7 +408,7 @@ always @(posedge clk) begin
 		// copy slot <- CUR: drive the dpram write port, 128 cycles
 		S_CP_W: begin
 			if (cpw_p == 7'd127) begin sl_cpw <= 1'b0; done <= 1'b1; st <= S_IDLE; end
-			else begin cpw_p <= cpw_p + 1'b1; bl_ra <= cpw_p + 1'b1; end
+			else begin cpw_p <= cpw_p + 1'b1; bl_ra <= cpw_p + 7'd2; end
 		end
 
 		// ---- landing: first_occ walks (col, then col+1 for horizontal) ----
@@ -431,7 +448,7 @@ always @(posedge clk) begin
 			// S_FO1/S_FO2 always give off_a = LEFT (horizontal) or TOP (vertical).
 			// a_o4[1] selects horizontal, matching the landing walks above.
 			pca <= a_o4[0] ? a_cb : a_ca; pcb <= a_o4[0] ? a_ca : a_cb;   // placed colors (delta)
-			li <= 0; st <= S_SCAN;
+			li <= 0; st <= S_PLACE_B;
 			// initialize line 0 (row of off_a)
 			soff <= {1'b0, off_a[6:3], 3'd0}; sstep <= 4'd1; scnt <= 5'd8;
 			srun <= 0; smcol <= 0;
@@ -470,7 +487,7 @@ always @(posedge clk) begin
 				// 24 lines: 0..15 = rows (stride 1, 8 cells), 16..23 = cols (stride 8, 16 cells)
 				reg [4:0] nx;
 				nx = fli + 5'd1;
-				if (fli == 5'd23) begin fwp2 <= 0; bl_ra <= 7'd0; st <= S_APPLY; end
+				if (fli == 5'd23) begin fwp2 <= 0; bl_ra <= 7'd0; st <= S_APPLY_W; end
 				else begin
 					fli <= nx;
 					if (nx < 5'd16) begin soff <= {nx[3:0], 3'd0}; sstep <= 4'd1; scnt <= 5'd8; end
@@ -482,7 +499,7 @@ always @(posedge clk) begin
 				2'd0: begin soff <= {5'd0, off_a[2:0]}; sstep <= 4'd8; scnt <= 5'd16; li <= 2'd1; st <= S_SCAN; end
 				2'd1: begin soff <= {1'b0, off_b[6:3], 3'd0}; sstep <= 4'd1; scnt <= 5'd8; li <= 2'd2; st <= S_SCAN; end
 				2'd2: begin soff <= {5'd0, off_b[2:0]}; sstep <= 4'd8; scnt <= 5'd16; li <= 2'd3; st <= S_SCAN; end
-				default: begin fwp2 <= 0; bl_ra <= 7'd0; st <= S_APPLY; end
+				default: begin fwp2 <= 0; bl_ra <= 7'd0; st <= S_APPLY_W; end
 			endcase
 		end
 
@@ -500,9 +517,17 @@ always @(posedge clk) begin
 		S_APPLY_P: begin
 			ap_pixr <= ap_pix;
 			ap_unl  <= ap_phas && !markb[ap_pix];
-			st <= S_APPLY2;
+			st <= S_APPLY_U;
 		end
-		// apply sweep, stage 3: WRITE, operands all registered.
+		S_APPLY_W:  st <= S_APPLY;   // RAM read latency
+		S_GRAV_W:   st <= S_GRAV;    // RAM read latency
+		S_GRAV2_W:  st <= S_GRAV2;   // RAM read latency
+		S_CP_W_P:   begin bl_ra <= 7'd1; st <= S_CP_W; end   // prime the copy-out read
+		S_PLACE_B:  st <= S_SCAN;    // second half's link (write port arm above)
+		S_APPLY_U:  st <= S_APPLY2;  // partner un-link  (write port arm above)
+		S_GRAV_MA:  st <= S_GRAV_M;  // vacate source    (write port arm above)
+		S_GRAV2MA:  st <= S_GRAV2M;  // vacate partner   (write port arm above)
+		// apply sweep, stage 4: WRITE, operands all registered.
 		// Clearing a cell also BREAKS THE LINK of a surviving partner: that partner
 		// becomes a loose single and falls on its own. If both halves are marked no
 		// unlink is needed -- they are both about to be blanked.
@@ -521,12 +546,12 @@ always @(posedge clk) begin
 					end else st <= S_DNEW;                     // non-clearing: child in CUR, run delta scans
 				end else if (anyclear || ap_m) begin
 					if (chain != 4'd15) chain <= chain + 1'b1;
-					st <= S_GRAV;
+					st <= S_GRAV_W;
 				end else
 					st <= S_RESDONE;                           // rescan found nothing: settled
 			end else begin
 				fwp2 <= fwp2 + 1'b1; bl_ra <= fwp2 + 1'b1;
-				st <= S_APPLY;
+				st <= S_APPLY_W;
 			end
 		end
 
@@ -574,7 +599,7 @@ always @(posedge clk) begin
 			blk = ga_blk0;
 			if (g_has && occ_of[g_k1 + 7'd8] && (g_k1 + 7'd8) != g_k0) blk = 1'b1;
 			g_do <= ga_occ && !ga_vir && ga_isrep && !blk;
-			st <= S_GRAV_M;
+			st <= S_GRAV_MA;
 		end
 		// gravity stage 2: move the representative cell down one row, from registers.
 		S_GRAV_M: begin
@@ -584,13 +609,13 @@ always @(posedge clk) begin
 				gmoved <= 1'b1;
 			end
 			if (g_do && g_has) begin
-				gk1 <= g_k1; bl_ra <= g_k1; st <= S_GRAV2;   // partner next: point at its link
+				gk1 <= g_k1; bl_ra <= g_k1; st <= S_GRAV2_W;  // partner next: point at its link
 			end else begin
 				// cursor advance + end-of-pass (mirrored in S_GRAV2M). bl_ra follows the
 				// cursor so the next S_GRAV already has its link word waiting.
 				// st is assigned FIRST so the terminal arm below can override it -- the
 				// other order makes the last nonblocking write win and the sweep never ends.
-				st <= S_GRAV;
+				st <= S_GRAV_W;
 				if (gc == 3'd7) begin
 					gc <= 3'd0;
 					if (gr == 4'd0) begin
@@ -606,7 +631,7 @@ always @(posedge clk) begin
 		// same reason as above.
 		S_GRAV2: begin
 			g_cell <= bcell[gk1]; g_lnk <= bl_rq;   // S_GRAV_M pointed bl_ra at gk1
-			st <= S_GRAV2M;
+			st <= S_GRAV2MA;
 		end
 		S_GRAV2M: begin
 			bcell[gk1 + 7'd8] <= g_cell;    // link half handled by the write funnel
@@ -617,7 +642,7 @@ always @(posedge clk) begin
 				if (gr == 4'd0) begin gr <= 4'd14; gmoved <= 1'b0; bl_ra <= {4'd14, 3'd0}; end
 				else begin gr <= gr - 1'b1; bl_ra <= {gr - 4'd1, 3'd0}; end
 			end else begin gc <= gc + 1'b1; bl_ra <= {gr, gc + 3'd1}; end
-			st <= S_GRAV;
+			st <= S_GRAV_W;
 		end
 		// settled with a_fix set: blank the mark plane and re-scan the WHOLE board for a
 		// follow-on clear. Round 1's 4-line targeted scan is not valid here because the
@@ -971,8 +996,9 @@ always @(posedge clk) begin
 			bcell[off_a] <= 3'd0; bcell[off_b] <= 3'd0;
 			dbur_new <= 1'b0; dcolstep <= 2'd0; dcol <= off_a[2:0]; drow <= 5'd0;
 			fillcnt <= 0; curcol <= 2'd0; curlen <= 5'd0; vseen <= 5'd0;
-			st <= S_DBUR;
+			st <= S_DUNPL_B;
 		end
+		S_DUNPL_B: st <= S_DBUR;   // second cell's link (write port arm above)
 
 		// rdy_ext/vrdy rescore: walk the placed cells' rows+cols, and for each same-color virus
 		// re-run the per-virus run/span machinery (reused) to get its old/new contribution.
