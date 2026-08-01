@@ -61,10 +61,11 @@ wire        a_lev    = (AB[15:8]  == 8'h70);         // $7000-$70FF: LeafEval ac
 wire [11:0] a_addr   = a_ram_st ? {4'h8, AB[7:0]} : AB[11:0];
 
 // ---------------------------------------------------------- LeafEval/BoardEngine
-// $7000-$707F W: board bytes into slot `wslot` (NES encoding -> 3-bit cells)
-// $70E0-$70E4 W: args o4/col/ca/cb/slot ; $70F3 W: wslot ; $70F4 W: command (pulse)
+// $7000-$707F W: board bytes into slot `wslot` (NES encoding -> 3-bit cell + 3-bit link)
+// $70E0-$70E4 W: args o4/col/ca/cb/slot ; $70E5 W: a_fix ; $70E6 W: a_chw (DRCHAIN/4)
+// $70F3 W: wslot ; $70F4 W: command (pulse)
 // $70F8 W: legacy LEAF start. Reads: $70F0/1 sco, $70F2 win, $70E8 legal,
-// $70E9/EA rv_cells/vir, $70EB/EC imm, $70F8 done.
+// $70E9/EA rv_cells/vir, $70EB/EC imm, $70ED dv_fallback, $70EE chain, $70F8 done.
 wire       lev_wr_board = WE && !cpu_rst && a_lev && !AB[7];
 wire       lev_start    = WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF8);
 wire       lev_cmd_go   = WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF4);
@@ -72,10 +73,25 @@ wire       lev_wr_arg   = WE && !cpu_rst && a_lev && (AB[7:4] == 4'hE) && !AB[3]
 wire [2:0] lev_enc = (DO == 8'hFF) ? 3'd0
                    : {(DO[7:4] == 4'hD), (DO[1:0] == 2'd0) ? 2'd1
                                         : (DO[1:0] == 2'd1) ? 2'd2 : 2'd3};
+// LINK NIBBLE. The playfield byte's HIGH nibble has always carried the capsule-half link
+// (MECHANICS_NES.md); this decode is the only reason the data ever reached the engine --
+// lev_enc above keeps just the $D virus test and throws the rest away. Codes below are
+// "which way the partner lies", matching cascade_link_x.py (0 NONE 1 UP 2 DOWN 3 LEFT
+// 4 RIGHT). $8x is an orphaned half, $Dx a virus, $FF empty: all unlinked.
+wire [2:0] lev_lnk = (DO[7:4] == 4'h4) ? 3'd2      // $4x top of a vertical pair
+                   : (DO[7:4] == 4'h5) ? 3'd1      // $5x bottom of a vertical pair
+                   : (DO[7:4] == 4'h6) ? 3'd4      // $6x left of a horizontal pair
+                   : (DO[7:4] == 4'h7) ? 3'd3      // $7x right of a horizontal pair
+                   : 3'd0;
 wire [1:0] lev_colenc = (DO[1:0] == 2'd0) ? 2'd1 : (DO[1:0] == 2'd1) ? 2'd2 : 2'd3;
 reg  [1:0] lev_wslot;
 reg  [1:0] lev_a_o4, lev_a_sl, lev_a_ca, lev_a_cb;
 reg  [2:0] lev_a_col;
+// The two ARM-SELECT bytes. Both power up to the no-op value, so firmware that writes
+// neither behaves exactly as the pre-link engine's successor (lnk1, no chain reward), and
+// switching arms on hardware is a firmware hex patch -- NOT a two-hour resynthesis.
+reg        lev_a_fix = 1'b0;   // $70E5: 0 = one clear round (lnk1), 1 = resolve to fixpoint
+reg  [7:0] lev_a_chw = 8'd0;   // $70E6: DRCHAIN dose / 4 (0 = no chain reward)
 always @(posedge clk_cpu) begin
 	if (WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF3)) lev_wslot <= DO[1:0];
 	if (lev_wr_arg)
@@ -84,13 +100,16 @@ always @(posedge clk_cpu) begin
 			3'd1: lev_a_col <= DO[2:0];
 			3'd2: lev_a_ca  <= lev_colenc;
 			3'd3: lev_a_cb  <= lev_colenc;
-			default: lev_a_sl <= DO[1:0];
+			3'd5: lev_a_fix <= DO[0];        // $70E5; firmware never wrote it before
+			3'd6: lev_a_chw <= DO;           // $70E6; likewise
+			default: lev_a_sl <= DO[1:0];    // $70E4 (and the unused $70E7 alias)
 		endcase
 end
 wire        lev_done, lev_win, lev_legal;
 wire [15:0] lev_sco, lev_imm;
-wire  [5:0] lev_rvc;
-wire  [3:0] lev_rvv;
+wire  [6:0] lev_rvc;
+wire  [5:0] lev_rvv;
+wire  [3:0] lev_chain;         // clear ROUNDS the resolve performed (1 = plain, >1 = cascade)
 wire        lev_dv_fallback;   // delta (CMD 7) hit a clearing placement -> firmware re-issues CMD 4
 LeafEval leafeval(
 	.clk   (clk_cpu),
@@ -98,6 +117,7 @@ LeafEval leafeval(
 	.wr    (lev_wr_board),
 	.waddr (AB[6:0]),
 	.wdata (lev_enc),
+	.wlnk  (lev_lnk),
 	.wslot (lev_wslot),
 	.start (lev_start),
 	.cmd   (DO[3:0]),
@@ -107,6 +127,8 @@ LeafEval leafeval(
 	.a_col (lev_a_col),
 	.a_ca  (lev_a_ca),
 	.a_cb  (lev_a_cb),
+	.a_fix (lev_a_fix),
+	.a_chw (lev_a_chw),
 	.done  (lev_done),
 	.sco   (lev_sco),
 	.win   (lev_win),
@@ -114,6 +136,7 @@ LeafEval leafeval(
 	.rv_cells(lev_rvc),
 	.rv_vir(lev_rvv),
 	.imm   (lev_imm),
+	.chain (lev_chain),
 	.dv_fallback(lev_dv_fallback)
 );
 reg [7:0] lev_q;
@@ -123,11 +146,12 @@ always @(posedge clk_cpu)
 		4'h1: lev_q <= lev_sco[15:8];
 		4'h2: lev_q <= {7'b0, lev_win};
 		4'h8: lev_q <= (AB[7:4] == 4'hE) ? {7'b0, lev_legal} : {7'b0, lev_done};
-		4'h9: lev_q <= {2'b0, lev_rvc};
-		4'hA: lev_q <= {4'b0, lev_rvv};
+		4'h9: lev_q <= {1'b0, lev_rvc};
+		4'hA: lev_q <= {2'b0, lev_rvv};
 		4'hB: lev_q <= lev_imm[7:0];
 		4'hC: lev_q <= lev_imm[15:8];
 		4'hD: lev_q <= {7'b0, lev_dv_fallback};   // $70xD: delta clearing-fallback flag
+		4'hE: lev_q <= {4'b0, lev_chain};         // $70xE: chain depth for the DRCHAIN reward
 		default: lev_q <= {7'b0, lev_done};
 	endcase
 

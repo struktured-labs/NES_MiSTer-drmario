@@ -4,9 +4,35 @@
 //
 // Cell encoding (written by the host/copro): 0 = empty, else {vir, color[1:0]}
 // with color 1..3 (NES low nibble + 1). Interface:
-//   write board[i]  : wr=1, waddr=i (0..127), wdata[2:0]
+//   write board[i]  : wr=1, waddr=i (0..127), wdata[2:0], wlnk[2:0]
 //   start           : pulse start=1 (loads nothing; board regs already written)
 //   done            : high when finished; sco[15:0] (signed) & win valid
+//
+// LINK PLANE (`blink`, this revision).  The NES playfield byte is high-nibble = link
+// direction, low-nibble = colour; the wrapper used to decode only the $D virus test and
+// discard the link.  `blink` carries it so gravity drops LINKED BODIES -- a capsule half
+// falls with its partner until that partner is cleared -- instead of dropping every cell
+// independently.  Compact per-cell gravity over-predicts cascade viruses 3.2x, which is
+// what made a cascade reward unmeasurable.
+//
+// The link plane is a SEPARATE 3-bit array rather than a widening of `bcell`, because NO
+// EVAL TERM READS LINKS: every walk below (colwalk, per-virus run/span, pollution, setup,
+// and the whole CMD6/7 delta engine) reads only colour, occupancy and virus-ness through
+// col_of/occ_of/vir_of.  Holding bcell at 3 bits leaves all of those 128:1 muxes
+// byte-identical, so the link plane costs muxes only where links are actually read:
+// S_APPLY (partner un-linking) and the gravity sweep.
+//
+// Link codes match the offline reference kernel (cascade_link_x.py):
+//   0 NONE   1 UP   2 DOWN   3 LEFT   4 RIGHT   -- "which way the partner lies".
+//
+// GRAVITY ORDER.  The reference enumerates bodies row-major then STABLE-SORTS them
+// lowest-first before dropping each one row, repeating to fixpoint.  A 128-entry stable
+// sort is not affordable here, and it is also not necessary: body gravity is confluent
+// (bodies only ever move DOWN), so any drop order reaches the same settled board.
+// MEASURED, not assumed -- a plain bottom-up sweep matched the sorted reference on the
+// colour, virus AND link planes plus cells/viruses/chain over 96,540 real placements
+// (L11 6 games + L17 8 games, cap-1 and fixpoint):
+// dr_mario_rl/tmp/rtl_chain/gravity_order_test.py.
 // Bit-exact contract (validated vs the python goldens in tb_leafeval):
 //   sco = 5000 - 12*maxh - 20*holes - 90*toprisk - 150*spawn + 32*setup
 //         - 48*buried + 8*rdy_ext + 8*vrdy - 6*pollution + matched60   (16-bit wrap; buried color-aware + nearest-2 cap, R6 matched-cover pre-scaled @48; r47b5: vrdy 24->12; eval-winner (coef-opt2): setup 60->32, buried 30->48, rdy_ext 12->8, vrdy 12->8, matched-cover 60->48 -- held-out -12.5 / TEST -11.0 paired-median pills vs vrdy12, RTL cost 21 vs 30 bits)
@@ -17,6 +43,7 @@ module LeafEval(
 	input             wr,          // board-window write into slot `wslot`
 	input       [6:0] waddr,
 	input       [2:0] wdata,
+	input       [2:0] wlnk,        // link code for the written cell (0 = none)
 	input       [1:0] wslot,       // 0=CUR 1=LIVE 2=WORK1 3=WORK2
 	input             start,       // legacy: LEAF on CUR
 	input       [3:0] cmd,         // 1=LEAF 2=CUR<-slot(a_sl) 3=slot(a_sl)<-CUR
@@ -27,13 +54,23 @@ module LeafEval(
 	input       [2:0] a_col,       // column 0..7
 	input       [1:0] a_ca,        // colors, ENGINE encoding 1..3 handled by wrapper (pass nibble+1)
 	input       [1:0] a_cb,
+	input             a_fix,       // 0 = stop after one clear round (lnk1 arm)
+	                               // 1 = resolve to fixpoint, counting rounds (chain arm)
+	input       [7:0] a_chw,       // DRCHAIN dose / 4. imm gains a_chw*4*(chain-1) when
+	                               // chain > 1, mirroring cascade_chain_x._imm_chain.
+	                               // 0 reproduces the no-reward arms EXACTLY (the term
+	                               // vanishes), which is what makes one bitstream serve
+	                               // lnk1, fixpoint+0 and fixpoint+dose. Scaling by 4 puts
+	                               // the measured doses (60/180/360, knee above 360) in a
+	                               // single patchable byte at 4-point granularity.
 	output reg        done,
 	output reg [15:0] sco,
 	output reg        win,
 	output reg        legal,
-	output reg  [5:0] rv_cells,
-	output reg  [3:0] rv_vir,
+	output reg  [6:0] rv_cells,    // widened for fixpoint: a cascade can clear > 63 cells
+	output reg  [5:0] rv_vir,      // widened for fixpoint: a cascade can clear > 15 viruses
 	output reg [15:0] imm,
+	output reg  [3:0] chain,       // clear ROUNDS performed (1 = plain clear, >1 = cascade)
 	output reg        dv_fallback   // CMD 7 (DELTA): placement clears -> host must re-issue as full NODE
 );
 
@@ -41,16 +78,20 @@ module LeafEval(
 // slots in ONE inferred BRAM (sequential access only: window writes + 130-cyc copies)
 // -- 3 register files didn't fit the device (fitter: 4246/4191 LABs).
 reg [2:0] bcell [0:127] /*verilator public_flat_rd*/;
+// link plane, same geometry. Only gravity and the clear-apply sweep read it.
+reg [2:0] blink [0:127] /*verilator public_flat_rd*/;
 // snapshot slots in an EXPLICIT dpram (behavioral arrays fail BRAM inference in
 // Quartus Std -> got synthesized as 1.5k registers and blew the LAB budget).
 // port A = writes (host window / copy-out walk), port B = registered reads (copy-in).
+// The slot words were already 8 bits wide with only 3 used, so the link plane rides
+// along in bits [5:3] for FREE -- no extra BRAM, no second RAM, no wider address.
 reg  [8:0] sr_addr;
 reg  [6:0] cpw_p;
 wire [8:0] sr_waddr = {wslot, waddr};
 wire       sl_we    = (wr && wslot != 2'd0) || sl_cpw;
 reg        sl_cpw;                    // S_CP_W write strobe
 wire [8:0] sl_wa    = sl_cpw ? {a_sl, cpw_p} : sr_waddr;
-wire [7:0] sl_wd    = sl_cpw ? {5'd0, bcell[cpw_p]} : {5'd0, wdata};
+wire [7:0] sl_wd    = sl_cpw ? {2'd0, blink[cpw_p], bcell[cpw_p]} : {2'd0, wlnk, wdata};
 wire [7:0] sl_qb;
 wire [2:0] slotq = sl_qb[2:0];
 dpram #(.widthad_a(9), .width_a(8)) slotram (
@@ -90,6 +131,12 @@ localparam S_IDLE=0, S_COLWALK=1, S_VNEXT=2, S_HRUN_L=3, S_HSPAN_L=4, S_HRUN_R=5
 // incremental-delta states (CMD 6 = BASE latch, CMD 7 = DELTA child)
 localparam S_DPOL=31, S_DNEW=32, S_DBUR=33, S_DADV=34, S_DRV=35,
            S_DRVFIN=36, S_DSETH=37, S_DUNPL=38, S_DSETV=39, S_DCOMB=40;
+// body gravity + fixpoint re-scan. S_GRAV keeps its number: it is now the bottom-up
+// body sweep instead of the old per-column compaction.
+localparam S_GRAV2=41,          // second cell of a two-cell body
+           S_FPREP=42;          // clear the mark plane, arm the 24-line full scan
+// link codes -- "which way the partner lies" (cascade_link_x.py)
+localparam [2:0] LK_NONE=3'd0, LK_UP=3'd1, LK_DOWN=3'd2, LK_LEFT=3'd3, LK_RIGHT=3'd4;
 reg [3:0] cmd_l;
 reg [5:0] st;
 reg       node_leaf;           // CMD_NODE: run the leaf after resolve
@@ -105,8 +152,18 @@ reg [4:0]   srun;              // current run length
 reg [1:0]   smcol;             // current run color (0 = none)
 reg [7:0]   srstart;           // run start offset
 reg [6:0]   fwp2;              // apply sweep pointer 0..127
-reg [4:0]   gdest;             // gravity dest row
 reg         anyclear;
+// ---- body-gravity sweep (replaces the old per-cell compaction) ----
+reg [3:0]   gr;                // sweep row 14..0 (row 15 can never fall)
+reg [2:0]   gc;                // sweep col 0..7
+reg         gmoved;            // a body moved this pass -> another pass is due
+reg [6:0]   gk1;               // partner cell queued for its own move cycle
+// ---- full-board re-scan (chain rounds 2+) ----
+// Round 1 needs only the 4 lines through the placed cells: a settled parent has no run
+// >= 4 anywhere else. After gravity the surviving cells have moved arbitrarily, so
+// rounds 2+ must scan all 16 rows and all 8 columns.
+reg         fullscan;
+reg [4:0]   fli;               // full-scan line: 0..15 = rows, 16..23 = cols
 
 reg  [3:0] wc, wr_;            // column/row walk indices
 reg  [4:0] maxh /*verilator public_flat_rd*/;
@@ -175,7 +232,9 @@ always @(posedge clk) begin
 		st <= S_IDLE; done <= 1'b0; sl_cpw <= 1'b0;
 		base_mode <= 1'b0; delta_mode <= 1'b0; dv_fallback <= 1'b0;
 	end else begin
-		if (wr && wslot == 2'd0) bcell[waddr] <= wdata;   // slot writes go via the dpram port
+		if (wr && wslot == 2'd0) begin                    // slot writes go via the dpram port
+			bcell[waddr] <= wdata; blink[waddr] <= wlnk;
+		end
 		case (st)
 		S_IDLE: if (start || cmd_go) begin
 			done <= 1'b0;
@@ -193,6 +252,7 @@ always @(posedge clk) begin
 				delta_mode <= 1'b0; base_mode <= 1'b0;           // FIX: a fresh NODE must not inherit a stale mode
 				legal <= 1'b0; rv_cells <= 0; rv_vir <= 0; imm <= 0;
 				markb <= 128'd0; anyclear <= 1'b0;
+				chain <= 4'd0; fullscan <= 1'b0;
 				fwp <= 0;
 				st <= S_FO1;
 			end
@@ -208,6 +268,7 @@ always @(posedge clk) begin
 				delta_mode <= 1'b1; node_leaf <= 1'b0; dv_fallback <= 1'b0;
 				legal <= 1'b0; rv_cells <= 0; rv_vir <= 0; imm <= 0;
 				markb <= 128'd0; anyclear <= 1'b0; fwp <= 0;
+				chain <= 4'd0; fullscan <= 1'b0;
 				od_bur <= 0; nd_bur <= 0; od_rdy <= 0; nd_rdy <= 0; od_vrdy <= 0; nd_vrdy <= 0;
 				od_set <= 0; nd_set <= 0; dd_matched <= 13'd0; dd_pol <= 0; dd_holes <= 0; affbit <= 128'd0;
 				dphase <= 2'd0;
@@ -228,6 +289,7 @@ always @(posedge clk) begin
 		end
 		S_CP_R: begin
 			bcell[fwp2] <= slotq;                 // slotq = cell fwp2
+			blink[fwp2] <= sl_qb[5:3];            // link plane rides in the spare slot bits
 			sr_addr <= sr_addr + 1'b1;
 			if (fwp2 == 7'd127) begin done <= 1'b1; st <= S_IDLE; end
 			else fwp2 <= fwp2 + 1'b1;
@@ -271,6 +333,11 @@ always @(posedge clk) begin
 			// orient4 odd = color swap (B goes to offa/top/left)
 			bcell[off_a] <= {1'b0, a_o4[0] ? a_cb : a_ca};
 			bcell[off_b] <= {1'b0, a_o4[0] ? a_ca : a_cb};
+			// the two halves are LINKED: they fall as one body until one of them clears.
+			// S_FO1/S_FO2 always give off_a = LEFT (horizontal) or TOP (vertical).
+			// a_o4[1] selects horizontal, matching the landing walks above.
+			blink[off_a] <= a_o4[1] ? LK_RIGHT : LK_DOWN;
+			blink[off_b] <= a_o4[1] ? LK_LEFT  : LK_UP;
 			pca <= a_o4[0] ? a_cb : a_ca; pcb <= a_o4[0] ? a_ca : a_cb;   // placed colors (delta)
 			li <= 0; st <= S_SCAN;
 			// initialize line 0 (row of off_a)
@@ -307,6 +374,18 @@ always @(posedge clk) begin
 				for (i = 0; i < 16; i = i + 1)
 					if (i < srun) markb[srstart[6:0] + i * sstep] <= 1'b1;
 			srun <= 0; smcol <= 0;
+			if (fullscan) begin : feol
+				// 24 lines: 0..15 = rows (stride 1, 8 cells), 16..23 = cols (stride 8, 16 cells)
+				reg [4:0] nx;
+				nx = fli + 5'd1;
+				if (fli == 5'd23) begin fwp2 <= 0; st <= S_APPLY; end
+				else begin
+					fli <= nx;
+					if (nx < 5'd16) begin soff <= {nx[3:0], 3'd0}; sstep <= 4'd1; scnt <= 5'd8; end
+					else            begin soff <= {5'd0, nx[2:0]}; sstep <= 4'd8; scnt <= 5'd16; end
+					st <= S_SCAN;
+				end
+			end else
 			case (li)
 				2'd0: begin soff <= {5'd0, off_a[2:0]}; sstep <= 4'd8; scnt <= 5'd16; li <= 2'd1; st <= S_SCAN; end
 				2'd1: begin soff <= {1'b0, off_b[6:3], 3'd0}; sstep <= 4'd1; scnt <= 5'd8; li <= 2'd2; st <= S_SCAN; end
@@ -316,48 +395,121 @@ always @(posedge clk) begin
 		end
 
 		S_APPLY: begin : apl
+			// Clearing a cell also BREAKS THE LINK of a surviving partner: that partner
+			// becomes a loose single and will fall on its own. Both halves marked -> no
+			// unlink needed, they are both about to be blanked.
+			reg [2:0] lk;
+			reg       phas;
+			reg [6:0] pix;
+			lk   = blink[fwp2];
+			phas = (lk == LK_UP    && fwp2[6:3] != 4'd0)
+			    || (lk == LK_DOWN  && fwp2[6:3] != 4'd15)
+			    || (lk == LK_LEFT  && fwp2[2:0] != 3'd0)
+			    || (lk == LK_RIGHT && fwp2[2:0] != 3'd7);
+			pix  = (lk == LK_UP)   ? fwp2 - 7'd8
+			     : (lk == LK_DOWN) ? fwp2 + 7'd8
+			     : (lk == LK_LEFT) ? fwp2 - 7'd1
+			     :                   fwp2 + 7'd1;
 			if (markb[fwp2]) begin
 				rv_cells <= rv_cells + 1'b1;
 				if (vir_of[fwp2]) rv_vir <= rv_vir + 1'b1;
 				bcell[fwp2] <= 3'd0;
+				blink[fwp2] <= LK_NONE;
+				if (phas && !markb[pix]) blink[pix] <= LK_NONE;
 				anyclear <= 1'b1;
 			end
 			if (fwp2 == 7'd127) begin
-				wc <= 0; gdest <= 5'd15; fwp <= 5'd15;   // gravity: col wc, read row fwp
+				gr <= 4'd14; gc <= 3'd0; gmoved <= 1'b0;   // arm the body-gravity sweep
 				if (delta_mode) begin
 					if (anyclear || markb[7'd127]) begin      // clearing placement -> host does full NODE
 						dv_fallback <= 1'b1; done <= 1'b1; delta_mode <= 1'b0; st <= S_IDLE;
 					end else st <= S_DNEW;                     // non-clearing: child in CUR, run delta scans
+				end else if (anyclear || markb[7'd127]) begin
+					if (chain != 4'd15) chain <= chain + 1'b1;
+					st <= S_GRAV;
 				end else
-					st <= (anyclear || markb[7'd127]) ? S_GRAV : S_RESDONE;
+					st <= S_RESDONE;                           // rescan found nothing: settled
 			end else
 				fwp2 <= fwp2 + 1'b1;
 		end
 
-		// gravity: per column bottom-up; viruses anchor (dest = read-1); pills fall to dest
+		// ---- BODY gravity: bottom-up sweep, repeated until a pass moves nothing ----
+		// The old code compacted each column independently, which drops a capsule half
+		// even when its partner is still supported -- that is the 3.2x cascade
+		// over-prediction. Here a linked pair falls only if BOTH halves are clear to move.
+		//
+		// Representative rule (removes the need for any `seen` bitmap): a vertical body is
+		// handled at its BOTTOM cell, a horizontal body at its LEFT cell. The sweep runs
+		// rows 14->0 and cols 0->7, so a body's partner is always a cell this pass has not
+		// reached yet, and nothing is processed twice. A link pointing off-board or at an
+		// empty cell is DANGLING and falls as a single, matching the reference kernel.
 		S_GRAV: begin : grv
-			reg [2:0] t;
-			t = bcell[{fwp[3:0], wc[2:0]}];
-			if (t != 3'd0) begin
-				if (t[2]) begin                       // virus: fixed anchor
-					gdest <= fwp - 1'b1;
-				end else begin
-					if (gdest != fwp) begin
-						bcell[{gdest[3:0], wc[2:0]}] <= t;
-						bcell[{fwp[3:0], wc[2:0]}] <= 3'd0;
-					end
-					gdest <= gdest - 1'b1;
-				end
+			reg [2:0] lk;
+			reg       isrep, haspt, blk, dofall;
+			reg [6:0] k0, k1;
+			k0 = {gr, gc};
+			lk = blink[k0];
+			haspt = 1'b0; k1 = 7'd0; isrep = 1'b1;
+			case (lk)
+				LK_UP:    if (gr != 4'd0 && occ_of[k0 - 7'd8]) begin haspt = 1'b1; k1 = k0 - 7'd8; end
+				LK_RIGHT: if (gc != 3'd7 && occ_of[k0 + 7'd1]) begin haspt = 1'b1; k1 = k0 + 7'd1; end
+				LK_DOWN:  if (gr != 4'd15 && occ_of[k0 + 7'd8]) isrep = 1'b0;  // partner below represents us
+				LK_LEFT:  if (gc != 3'd0 && occ_of[k0 - 7'd1]) isrep = 1'b0;   // partner to the left does
+				default: ;
+			endcase
+			// blocked if any body cell has an occupied cell beneath that is not body itself.
+			// gr <= 14 so k0+8 is on-board; k1's row is <= 14 for every representative case.
+			blk = occ_of[k0 + 7'd8];
+			if (haspt && occ_of[k1 + 7'd8] && (k1 + 7'd8) != k0) blk = 1'b1;
+			dofall = occ_of[k0] && !vir_of[k0] && isrep && !blk;
+			if (dofall) begin
+				bcell[k0 + 7'd8] <= bcell[k0]; blink[k0 + 7'd8] <= blink[k0];
+				bcell[k0]        <= 3'd0;      blink[k0]        <= LK_NONE;
+				gmoved <= 1'b1;
 			end
-			if (fwp == 5'd0) begin
-				if (wc == 3'd7) st <= S_RESDONE;
-				else begin wc <= wc + 1'b1; gdest <= 5'd15; fwp <= 5'd15; end
-			end else
-				fwp <= fwp - 1'b1;
+			if (dofall && haspt) begin
+				gk1 <= k1; st <= S_GRAV2;         // second cell moves next cycle
+			end else begin
+				// cursor advance + end-of-pass (mirrored in S_GRAV2)
+				if (gc == 3'd7) begin
+					gc <= 3'd0;
+					if (gr == 4'd0) begin
+						if (gmoved || dofall) begin gr <= 4'd14; gmoved <= 1'b0; end
+						else st <= a_fix ? S_FPREP : S_RESDONE;
+					end else gr <= gr - 1'b1;
+				end else gc <= gc + 1'b1;
+			end
+		end
+		// second cell of a two-cell body. For a vertical pair gk1 + 8 == the cell S_GRAV
+		// just vacated, so this must be its own cycle, not a second write port.
+		S_GRAV2: begin
+			bcell[gk1 + 7'd8] <= bcell[gk1]; blink[gk1 + 7'd8] <= blink[gk1];
+			bcell[gk1]        <= 3'd0;       blink[gk1]        <= LK_NONE;
+			// cursor advance + end-of-pass (gmoved is already 1 from S_GRAV)
+			if (gc == 3'd7) begin
+				gc <= 3'd0;
+				if (gr == 4'd0) begin gr <= 4'd14; gmoved <= 1'b0; end
+				else gr <= gr - 1'b1;
+			end else gc <= gc + 1'b1;
+			st <= S_GRAV;
+		end
+		// settled with a_fix set: blank the mark plane and re-scan the WHOLE board for a
+		// follow-on clear. Round 1's 4-line targeted scan is not valid here because the
+		// survivors have moved.
+		S_FPREP: begin
+			markb <= 128'd0; anyclear <= 1'b0;
+			fullscan <= 1'b1; fli <= 5'd0;
+			soff <= 8'd0; sstep <= 4'd1; scnt <= 5'd8;
+			srun <= 0; smcol <= 0;
+			st <= S_SCAN;
 		end
 
 		S_RESDONE: begin
-			imm <= 16'd180 * rv_vir + 16'd10 * rv_cells;
+			// chain reward: only a real CASCADE pays, never a plain clear (chain == 1),
+			// so the term is gated on chain > 1 exactly as _imm_chain gates on ch > 1.
+			imm <= 16'd180 * rv_vir + 16'd10 * rv_cells
+			     + ((chain > 4'd1) ? ({6'd0, a_chw, 2'b00} * {12'd0, (chain - 4'd1)})
+			                       : 16'd0);
 			if (node_leaf) begin
 				maxh <= 0; holes <= 0; toprisk <= 0; spawn <= 0; setup <= 0;
 				pollution <= 0; buried <= 0; rdy_ext <= 0; vrdy <= 0; anyvir <= 0; matched60 <= 13'd0;
