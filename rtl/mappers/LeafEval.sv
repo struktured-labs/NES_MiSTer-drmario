@@ -205,6 +205,7 @@ localparam S_GRAV2=41,          // second cell of a two-cell body: READ
 // that ends at a register and a WRITE cycle whose operands are all registers. Costs 2x
 // cycles in the apply and gravity sweeps -- both clearing-path only.
            S_APPLY_P=46,        // apply sweep: RESOLVE the partner (markb lookup)
+           S_GRAV_D=47,         // gravity: DECIDE (the k1-indexed blocker lookup)
            S_APPLY2=43,         // apply sweep: WRITE
            S_GRAV_M=44,         // gravity: WRITE first cell
            S_GRAV2M=45;         // gravity: WRITE partner cell
@@ -233,6 +234,12 @@ reg         gmoved;            // a body moved this pass -> another pass is due
 reg [6:0]   gk1;               // partner cell queued for its own move cycle
 // READ/DECIDE -> WRITE pipeline registers (see the S_GRAV_M / S_APPLY2 timing note)
 reg         g_do, g_has;       // this body falls / it has a second cell
+// Stage-A captures for the fall decision. The chain was blink mux -> k1 -> bcell mux ->
+// dofall: TWO 128:1 muxes in series feeding one register, and after the apply sweep was
+// fixed it became the worst path on the copro clock (-0.113 ns). Splitting it puts the
+// k0-indexed lookups (k0 is cursor-derived, so register-driven) in stage A and the single
+// k1-indexed blocker lookup in stage B, one mux deep each.
+reg         ga_isrep, ga_occ, ga_vir, ga_blk0;
 reg [6:0]   g_k0, g_k1;
 reg [2:0]   g_cell, g_lnk;     // the cell being moved, captured before it is cleared
 reg         ap_m, ap_vir;      // apply sweep: marked / was a virus
@@ -551,10 +558,22 @@ always @(posedge clk) begin
 			// gr <= 14 so k0+8 is on-board; k1's row is <= 14 for every representative case.
 			blk = occ_of[k0 + 7'd8];
 			if (haspt && occ_of[k1 + 7'd8] && (k1 + 7'd8) != k0) blk = 1'b1;
-			dofall = occ_of[k0] && !vir_of[k0] && isrep && !blk;
-			// stage 1 is READ/DECIDE ONLY -- capture the cell before anything is written
-			g_do <= dofall; g_has <= haspt; g_k0 <= k0; g_k1 <= k1;
+			// stage A is READ ONLY -- capture the cell, the body shape, and every
+			// k0-indexed lookup. `blk` needs a k1-indexed one, so it waits for stage B.
+			g_has <= haspt; g_k0 <= k0; g_k1 <= k1;
 			g_cell <= bcell[k0]; g_lnk <= lk;
+			ga_isrep <= isrep; ga_occ <= occ_of[k0]; ga_vir <= vir_of[k0];
+			ga_blk0  <= occ_of[k0 + 7'd8];
+			st <= S_GRAV_D;
+		end
+		// gravity stage B: the one lookup that needed k1, now indexed by a REGISTER.
+		// A body falls only if every cell of it has an empty cell beneath that is not the
+		// body itself; g_k1 + 8 == g_k0 is the vertical pair resting on its own lower half.
+		S_GRAV_D: begin : grvd
+			reg blk;
+			blk = ga_blk0;
+			if (g_has && occ_of[g_k1 + 7'd8] && (g_k1 + 7'd8) != g_k0) blk = 1'b1;
+			g_do <= ga_occ && !ga_vir && ga_isrep && !blk;
 			st <= S_GRAV_M;
 		end
 		// gravity stage 2: move the representative cell down one row, from registers.
