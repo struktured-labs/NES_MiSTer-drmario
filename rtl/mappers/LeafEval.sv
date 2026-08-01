@@ -80,6 +80,68 @@ module LeafEval(
 reg [2:0] bcell [0:127] /*verilator public_flat_rd*/;
 // link plane, same geometry. Only gravity and the clear-apply sweep read it.
 reg [2:0] blink [0:127] /*verilator public_flat_rd*/;
+// ONE read address, ONE read mux, for the WHOLE link plane.
+//
+// Four independent `blink[<expr>]` reads meant four independent 128:1 mux trees, and that
+// -- not the write decoders -- is where the area went. MEASURED: merging the link into a
+// 6-bit bcell, which shares the write decoders, changed the standalone cost by exactly 0
+// ALMs (8,674 either way). Sharing the READ port is the lever that actually moves.
+//
+// Every consumer already captures the value into a register on the next cycle (see the
+// timing split below), so each one simply drives bl_ra one state early and reads bl_rq.
+// That is also exactly the shape a BRAM wants, if the plane ever has to move into one.
+reg  [6:0] bl_ra;
+wire [2:0] bl_rq = blink[bl_ra];
+
+// ---- link-plane WRITE PORTS -------------------------------------------------------
+// Ten separate `blink[<expr>] <=` statements give every one of the 128 registers a
+// ten-way enable and a ten-way data mux. Funnelling the FSM's writes through TWO explicit
+// ports leaves each register a 2-way enable and a 2:1 mux, with one shared address select
+// in front -- the same trick as bl_ra, applied to the write side. No state writes the same
+// address twice, so collapsing them loses no ordering.
+// (The host-window write keeps its own statement: it fires while the FSM is idle, and
+// leaving it separate preserves the original last-write-wins ordering for free.)
+wire       ap_phas = (ap_lk == LK_UP    && ap_i[6:3] != 4'd0)
+                  || (ap_lk == LK_DOWN  && ap_i[6:3] != 4'd15)
+                  || (ap_lk == LK_LEFT  && ap_i[2:0] != 3'd0)
+                  || (ap_lk == LK_RIGHT && ap_i[2:0] != 3'd7);
+wire [6:0] ap_pix  = (ap_lk == LK_UP)   ? ap_i - 7'd8
+                   : (ap_lk == LK_DOWN) ? ap_i + 7'd8
+                   : (ap_lk == LK_LEFT) ? ap_i - 7'd1
+                   :                      ap_i + 7'd1;
+reg  [6:0] bl_wa0, bl_wa1;
+reg  [2:0] bl_wd0, bl_wd1;
+reg        bl_we0, bl_we1;
+always @* begin
+	bl_we0 = 1'b0; bl_wa0 = 7'd0; bl_wd0 = LK_NONE;
+	bl_we1 = 1'b0; bl_wa1 = 7'd0; bl_wd1 = LK_NONE;
+	case (st)
+	S_CP_R:  begin bl_we0 = 1'b1; bl_wa0 = fwp2;  bl_wd0 = sl_qb[5:3]; end
+	S_PLACE: begin
+		bl_we0 = 1'b1; bl_wa0 = off_a; bl_wd0 = a_o4[1] ? LK_RIGHT : LK_DOWN;
+		bl_we1 = 1'b1; bl_wa1 = off_b; bl_wd1 = a_o4[1] ? LK_LEFT  : LK_UP;
+	end
+	S_APPLY2: if (ap_m) begin
+		bl_we0 = 1'b1; bl_wa0 = ap_i;  bl_wd0 = LK_NONE;
+		if (ap_phas && !markb[ap_pix]) begin
+			bl_we1 = 1'b1; bl_wa1 = ap_pix; bl_wd1 = LK_NONE;
+		end
+	end
+	S_GRAV_M: if (g_do) begin
+		bl_we0 = 1'b1; bl_wa0 = g_k0 + 7'd8; bl_wd0 = g_lnk;
+		bl_we1 = 1'b1; bl_wa1 = g_k0;        bl_wd1 = LK_NONE;
+	end
+	S_GRAV2M: begin
+		bl_we0 = 1'b1; bl_wa0 = gk1 + 7'd8;  bl_wd0 = g_lnk;
+		bl_we1 = 1'b1; bl_wa1 = gk1;         bl_wd1 = LK_NONE;
+	end
+	S_DUNPL: begin
+		bl_we0 = 1'b1; bl_wa0 = off_a; bl_wd0 = LK_NONE;
+		bl_we1 = 1'b1; bl_wa1 = off_b; bl_wd1 = LK_NONE;
+	end
+	default: ;
+	endcase
+end
 // snapshot slots in an EXPLICIT dpram (behavioral arrays fail BRAM inference in
 // Quartus Std -> got synthesized as 1.5k registers and blew the LAB budget).
 // port A = writes (host window / copy-out walk), port B = registered reads (copy-in).
@@ -91,7 +153,7 @@ wire [8:0] sr_waddr = {wslot, waddr};
 wire       sl_we    = (wr && wslot != 2'd0) || sl_cpw;
 reg        sl_cpw;                    // S_CP_W write strobe
 wire [8:0] sl_wa    = sl_cpw ? {a_sl, cpw_p} : sr_waddr;
-wire [7:0] sl_wd    = sl_cpw ? {2'd0, blink[cpw_p], bcell[cpw_p]} : {2'd0, wlnk, wdata};
+wire [7:0] sl_wd    = sl_cpw ? {2'd0, bl_rq, bcell[cpw_p]} : {2'd0, wlnk, wdata};
 wire [7:0] sl_qb;
 wire [2:0] slotq = sl_qb[2:0];
 dpram #(.widthad_a(9), .width_a(8)) slotram (
@@ -252,6 +314,8 @@ always @(posedge clk) begin
 		if (wr && wslot == 2'd0) begin                    // slot writes go via the dpram port
 			bcell[waddr] <= wdata; blink[waddr] <= wlnk;
 		end
+		if (bl_we0) blink[bl_wa0] <= bl_wd0;   // link-plane write ports (see the funnel above)
+		if (bl_we1) blink[bl_wa1] <= bl_wd1;
 		case (st)
 		S_IDLE: if (start || cmd_go) begin
 			done <= 1'b0;
@@ -295,7 +359,7 @@ always @(posedge clk) begin
 
 		// copy CUR <- slot: pipelined BRAM read (addr set cycle N, data cycle N+1)
 		S_COPY: begin
-			fwp2 <= 0; cpw_p <= 0;
+			fwp2 <= 0; cpw_p <= 0; bl_ra <= 7'd0;   // bl_ra tracks cpw_p through the walk
 			sr_addr <= {a_sl, 7'd0};
 			if (cmd_l == 4'd2) st <= S_CP_P;
 			else begin sl_cpw <= 1'b1; st <= S_CP_W; end
@@ -306,7 +370,6 @@ always @(posedge clk) begin
 		end
 		S_CP_R: begin
 			bcell[fwp2] <= slotq;                 // slotq = cell fwp2
-			blink[fwp2] <= sl_qb[5:3];            // link plane rides in the spare slot bits
 			sr_addr <= sr_addr + 1'b1;
 			if (fwp2 == 7'd127) begin done <= 1'b1; st <= S_IDLE; end
 			else fwp2 <= fwp2 + 1'b1;
@@ -314,7 +377,7 @@ always @(posedge clk) begin
 		// copy slot <- CUR: drive the dpram write port, 128 cycles
 		S_CP_W: begin
 			if (cpw_p == 7'd127) begin sl_cpw <= 1'b0; done <= 1'b1; st <= S_IDLE; end
-			else cpw_p <= cpw_p + 1'b1;
+			else begin cpw_p <= cpw_p + 1'b1; bl_ra <= cpw_p + 1'b1; end
 		end
 
 		// ---- landing: first_occ walks (col, then col+1 for horizontal) ----
@@ -353,8 +416,6 @@ always @(posedge clk) begin
 			// the two halves are LINKED: they fall as one body until one of them clears.
 			// S_FO1/S_FO2 always give off_a = LEFT (horizontal) or TOP (vertical).
 			// a_o4[1] selects horizontal, matching the landing walks above.
-			blink[off_a] <= a_o4[1] ? LK_RIGHT : LK_DOWN;
-			blink[off_b] <= a_o4[1] ? LK_LEFT  : LK_UP;
 			pca <= a_o4[0] ? a_cb : a_ca; pcb <= a_o4[0] ? a_ca : a_cb;   // placed colors (delta)
 			li <= 0; st <= S_SCAN;
 			// initialize line 0 (row of off_a)
@@ -395,7 +456,7 @@ always @(posedge clk) begin
 				// 24 lines: 0..15 = rows (stride 1, 8 cells), 16..23 = cols (stride 8, 16 cells)
 				reg [4:0] nx;
 				nx = fli + 5'd1;
-				if (fli == 5'd23) begin fwp2 <= 0; st <= S_APPLY; end
+				if (fli == 5'd23) begin fwp2 <= 0; bl_ra <= 7'd0; st <= S_APPLY; end
 				else begin
 					fli <= nx;
 					if (nx < 5'd16) begin soff <= {nx[3:0], 3'd0}; sstep <= 4'd1; scnt <= 5'd8; end
@@ -407,7 +468,7 @@ always @(posedge clk) begin
 				2'd0: begin soff <= {5'd0, off_a[2:0]}; sstep <= 4'd8; scnt <= 5'd16; li <= 2'd1; st <= S_SCAN; end
 				2'd1: begin soff <= {1'b0, off_b[6:3], 3'd0}; sstep <= 4'd1; scnt <= 5'd8; li <= 2'd2; st <= S_SCAN; end
 				2'd2: begin soff <= {5'd0, off_b[2:0]}; sstep <= 4'd8; scnt <= 5'd16; li <= 2'd3; st <= S_SCAN; end
-				default: begin fwp2 <= 0; st <= S_APPLY; end
+				default: begin fwp2 <= 0; bl_ra <= 7'd0; st <= S_APPLY; end
 			endcase
 		end
 
@@ -415,7 +476,7 @@ always @(posedge clk) begin
 		// that it never feeds the blink write decode in the same cycle.
 		S_APPLY: begin
 			ap_m   <= markb[fwp2];
-			ap_lk  <= blink[fwp2];
+			ap_lk  <= bl_rq;                  // == blink[fwp2]
 			ap_vir <= vir_of[fwp2];
 			ap_i   <= fwp2;
 			st <= S_APPLY2;
@@ -425,26 +486,14 @@ always @(posedge clk) begin
 		// becomes a loose single and falls on its own. If both halves are marked no
 		// unlink is needed -- they are both about to be blanked.
 		S_APPLY2: begin : apl
-			reg       phas;
-			reg [6:0] pix;
-			phas = (ap_lk == LK_UP    && ap_i[6:3] != 4'd0)
-			    || (ap_lk == LK_DOWN  && ap_i[6:3] != 4'd15)
-			    || (ap_lk == LK_LEFT  && ap_i[2:0] != 3'd0)
-			    || (ap_lk == LK_RIGHT && ap_i[2:0] != 3'd7);
-			pix  = (ap_lk == LK_UP)   ? ap_i - 7'd8
-			     : (ap_lk == LK_DOWN) ? ap_i + 7'd8
-			     : (ap_lk == LK_LEFT) ? ap_i - 7'd1
-			     :                      ap_i + 7'd1;
 			if (ap_m) begin
 				rv_cells <= rv_cells + 1'b1;
 				if (ap_vir) rv_vir <= rv_vir + 1'b1;
-				bcell[ap_i] <= 3'd0;
-				blink[ap_i] <= LK_NONE;
-				if (phas && !markb[pix]) blink[pix] <= LK_NONE;
+				bcell[ap_i] <= 3'd0;      // blink[ap_i] and the partner un-link: write funnel
 				anyclear <= 1'b1;
 			end
 			if (ap_i == 7'd127) begin
-				gr <= 4'd14; gc <= 3'd0; gmoved <= 1'b0;   // arm the body-gravity sweep
+				gr <= 4'd14; gc <= 3'd0; gmoved <= 1'b0; bl_ra <= {4'd14, 3'd0};  // arm the sweep
 				if (delta_mode) begin
 					if (anyclear || ap_m) begin               // clearing placement -> host does full NODE
 						dv_fallback <= 1'b1; done <= 1'b1; delta_mode <= 1'b0; st <= S_IDLE;
@@ -455,7 +504,7 @@ always @(posedge clk) begin
 				end else
 					st <= S_RESDONE;                           // rescan found nothing: settled
 			end else begin
-				fwp2 <= fwp2 + 1'b1;
+				fwp2 <= fwp2 + 1'b1; bl_ra <= fwp2 + 1'b1;
 				st <= S_APPLY;
 			end
 		end
@@ -475,7 +524,7 @@ always @(posedge clk) begin
 			reg       isrep, haspt, blk, dofall;
 			reg [6:0] k0, k1;
 			k0 = {gr, gc};
-			lk = blink[k0];
+			lk = bl_rq;                       // == blink[k0]: bl_ra tracks the cursor (invariant)
 			haspt = 1'b0; k1 = 7'd0; isrep = 1'b1;
 			case (lk)
 				LK_UP:    if (gr != 4'd0 && occ_of[k0 - 7'd8]) begin haspt = 1'b1; k1 = k0 - 7'd8; end
@@ -497,42 +546,44 @@ always @(posedge clk) begin
 		// gravity stage 2: move the representative cell down one row, from registers.
 		S_GRAV_M: begin
 			if (g_do) begin
-				bcell[g_k0 + 7'd8] <= g_cell; blink[g_k0 + 7'd8] <= g_lnk;
-				bcell[g_k0]        <= 3'd0;   blink[g_k0]        <= LK_NONE;
+				bcell[g_k0 + 7'd8] <= g_cell;   // link half handled by the write funnel
+				bcell[g_k0]        <= 3'd0;
 				gmoved <= 1'b1;
 			end
 			if (g_do && g_has) begin
-				gk1 <= g_k1; st <= S_GRAV2;       // partner follows in its own two cycles
+				gk1 <= g_k1; bl_ra <= g_k1; st <= S_GRAV2;   // partner next: point at its link
 			end else begin
-				// cursor advance + end-of-pass (mirrored in S_GRAV2M).
+				// cursor advance + end-of-pass (mirrored in S_GRAV2M). bl_ra follows the
+				// cursor so the next S_GRAV already has its link word waiting.
 				// st is assigned FIRST so the terminal arm below can override it -- the
 				// other order makes the last nonblocking write win and the sweep never ends.
 				st <= S_GRAV;
 				if (gc == 3'd7) begin
 					gc <= 3'd0;
 					if (gr == 4'd0) begin
-						if (gmoved || g_do) begin gr <= 4'd14; gmoved <= 1'b0; end
-						else st <= a_fix ? S_FPREP : S_RESDONE;
-					end else gr <= gr - 1'b1;
-				end else gc <= gc + 1'b1;
+						if (gmoved || g_do) begin
+							gr <= 4'd14; gmoved <= 1'b0; bl_ra <= {4'd14, 3'd0};
+						end else st <= a_fix ? S_FPREP : S_RESDONE;
+					end else begin gr <= gr - 1'b1; bl_ra <= {gr - 4'd1, 3'd0}; end
+				end else begin gc <= gc + 1'b1; bl_ra <= {gr, gc + 3'd1}; end
 			end
 		end
 		// second cell of a two-cell body. For a vertical pair gk1 + 8 == the cell S_GRAV_M
 		// just vacated, so it must follow that write, not share the cycle. Read then write,
 		// same reason as above.
 		S_GRAV2: begin
-			g_cell <= bcell[gk1]; g_lnk <= blink[gk1];
+			g_cell <= bcell[gk1]; g_lnk <= bl_rq;   // S_GRAV_M pointed bl_ra at gk1
 			st <= S_GRAV2M;
 		end
 		S_GRAV2M: begin
-			bcell[gk1 + 7'd8] <= g_cell; blink[gk1 + 7'd8] <= g_lnk;
-			bcell[gk1]        <= 3'd0;   blink[gk1]        <= LK_NONE;
+			bcell[gk1 + 7'd8] <= g_cell;    // link half handled by the write funnel
+			bcell[gk1]        <= 3'd0;
 			// cursor advance + end-of-pass (gmoved is already 1 from S_GRAV_M)
 			if (gc == 3'd7) begin
 				gc <= 3'd0;
-				if (gr == 4'd0) begin gr <= 4'd14; gmoved <= 1'b0; end
-				else gr <= gr - 1'b1;
-			end else gc <= gc + 1'b1;
+				if (gr == 4'd0) begin gr <= 4'd14; gmoved <= 1'b0; bl_ra <= {4'd14, 3'd0}; end
+				else begin gr <= gr - 1'b1; bl_ra <= {gr - 4'd1, 3'd0}; end
+			end else begin gc <= gc + 1'b1; bl_ra <= {gr, gc + 3'd1}; end
 			st <= S_GRAV;
 		end
 		// settled with a_fix set: blank the mark plane and re-scan the WHOLE board for a
@@ -883,7 +934,8 @@ always @(posedge clk) begin
 			end else drow <= drow + 1'b1;
 		end
 		S_DUNPL: begin
-			bcell[off_a] <= 3'd0; bcell[off_b] <= 3'd0;   // placed cells were empty on the settled parent
+			// placed cells were empty on the settled parent; the funnel clears their links too
+			bcell[off_a] <= 3'd0; bcell[off_b] <= 3'd0;
 			dbur_new <= 1'b0; dcolstep <= 2'd0; dcol <= off_a[2:0]; drow <= 5'd0;
 			fillcnt <= 0; curcol <= 2'd0; curlen <= 5'd0; vseen <= 5'd0;
 			st <= S_DBUR;
