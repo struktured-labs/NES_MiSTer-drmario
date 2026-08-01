@@ -281,6 +281,14 @@ reg         g_do, g_has;       // this body falls / it has a second cell
 // k0-indexed lookups (k0 is cursor-derived, so register-driven) in stage A and the single
 // k1-indexed blocker lookup in stage B, one mux deep each.
 reg         ga_isrep, ga_occ, ga_vir, ga_blk0;
+// DRCHAIN reward as an ACCUMULATOR, not a multiply. The multiplier form put a DSP's
+// clock-enable at the end of a bcell-indexed FSM branch (worst path was
+// bcell[64] -> Mult7~8|ENA_DFF0, +0.026 ns), and chain depth is small enough that
+// w_chain*(chain-1) is just "add w_chain on every round after the first". Costs an adder,
+// refunds a DSP, and takes the multiply off the critical path entirely.
+// Saturation: chain stops at 15, so the bonus stops with it -- the reward cannot run away
+// on a pathological board. Real boards top out at chain 3.
+reg [15:0]  chain_bonus;
 reg [6:0]   g_k0, g_k1;
 reg [2:0]   g_cell, g_lnk;     // the cell being moved, captured before it is cleared
 reg         ap_m, ap_vir;      // apply sweep: marked / was a virus
@@ -387,7 +395,7 @@ always @(posedge clk) begin
 				delta_mode <= 1'b0; base_mode <= 1'b0;           // FIX: a fresh NODE must not inherit a stale mode
 				legal <= 1'b0; rv_cells <= 0; rv_vir <= 0; imm <= 0;
 				markb <= 128'd0; anyclear <= 1'b0;
-				chain <= 4'd0; fullscan <= 1'b0;
+				chain <= 4'd0; chain_bonus <= 16'd0; fullscan <= 1'b0;
 				fwp <= 0;
 				st <= S_FO1;
 			end
@@ -403,7 +411,7 @@ always @(posedge clk) begin
 				delta_mode <= 1'b1; node_leaf <= 1'b0; dv_fallback <= 1'b0;
 				legal <= 1'b0; rv_cells <= 0; rv_vir <= 0; imm <= 0;
 				markb <= 128'd0; anyclear <= 1'b0; fwp <= 0;
-				chain <= 4'd0; fullscan <= 1'b0;
+				chain <= 4'd0; chain_bonus <= 16'd0; fullscan <= 1'b0;
 				od_bur <= 0; nd_bur <= 0; od_rdy <= 0; nd_rdy <= 0; od_vrdy <= 0; nd_vrdy <= 0;
 				od_set <= 0; nd_set <= 0; dd_matched <= 13'd0; dd_pol <= 0; dd_holes <= 0; affbit <= 128'd0;
 				dphase <= 2'd0;
@@ -568,7 +576,11 @@ always @(posedge clk) begin
 						dv_fallback <= 1'b1; done <= 1'b1; delta_mode <= 1'b0; st <= S_IDLE;
 					end else st <= S_DNEW;                     // non-clearing: child in CUR, run delta scans
 				end else if (anyclear || ap_m) begin
-					if (chain != 4'd15) chain <= chain + 1'b1;
+					if (chain != 4'd15) begin
+						chain <= chain + 1'b1;
+						// every round AFTER the first pays w_chain: total = w_chain*(chain-1)
+						if (chain >= 4'd1) chain_bonus <= chain_bonus + {6'd0, a_chw, 2'b00};
+					end
 					st <= S_GRAV_W;
 				end else
 					st <= S_RESDONE;                           // rescan found nothing: settled
@@ -681,9 +693,7 @@ always @(posedge clk) begin
 		S_RESDONE: begin
 			// chain reward: only a real CASCADE pays, never a plain clear (chain == 1),
 			// so the term is gated on chain > 1 exactly as _imm_chain gates on ch > 1.
-			imm <= 16'd180 * rv_vir + 16'd10 * rv_cells
-			     + ((chain > 4'd1) ? ({6'd0, a_chw, 2'b00} * {12'd0, (chain - 4'd1)})
-			                       : 16'd0);
+			imm <= 16'd180 * rv_vir + 16'd10 * rv_cells + chain_bonus;
 			if (node_leaf) begin
 				maxh <= 0; holes <= 0; toprisk <= 0; spawn <= 0; setup <= 0;
 				pollution <= 0; buried <= 0; rdy_ext <= 0; vrdy <= 0; anyvir <= 0; matched60 <= 13'd0;
