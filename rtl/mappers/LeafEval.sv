@@ -122,9 +122,9 @@ always @* begin
 		bl_we1 = 1'b1; bl_wa1 = off_b; bl_wd1 = a_o4[1] ? LK_LEFT  : LK_UP;
 	end
 	S_APPLY2: if (ap_m) begin
-		bl_we0 = 1'b1; bl_wa0 = ap_i;  bl_wd0 = LK_NONE;
-		if (ap_phas && !markb[ap_pix]) begin
-			bl_we1 = 1'b1; bl_wa1 = ap_pix; bl_wd1 = LK_NONE;
+		bl_we0 = 1'b1; bl_wa0 = ap_i;   bl_wd0 = LK_NONE;
+		if (ap_unl) begin
+			bl_we1 = 1'b1; bl_wa1 = ap_pixr; bl_wd1 = LK_NONE;
 		end
 	end
 	S_GRAV_M: if (g_do) begin
@@ -204,6 +204,7 @@ localparam S_GRAV2=41,          // second cell of a two-cell body: READ
 // +0.118 ns margin into -3.241. Each sweep is therefore split into a READ/DECIDE cycle
 // that ends at a register and a WRITE cycle whose operands are all registers. Costs 2x
 // cycles in the apply and gravity sweeps -- both clearing-path only.
+           S_APPLY_P=46,        // apply sweep: RESOLVE the partner (markb lookup)
            S_APPLY2=43,         // apply sweep: WRITE
            S_GRAV_M=44,         // gravity: WRITE first cell
            S_GRAV2M=45;         // gravity: WRITE partner cell
@@ -237,6 +238,12 @@ reg [2:0]   g_cell, g_lnk;     // the cell being moved, captured before it is cl
 reg         ap_m, ap_vir;      // apply sweep: marked / was a virus
 reg [2:0]   ap_lk;
 reg [6:0]   ap_i;
+// Partner resolved in its OWN stage. `markb[ap_pix]` is a second 128:1 mux, and letting it
+// feed the blink write enable in the same cycle left the copro clock at -0.312 ns with
+// every failing path reading markb[..] -> blink[..]. Registering the lookup splits that
+// into (registers -> pix arith -> markb mux -> register) and (registers -> write decode).
+reg         ap_unl;            // partner survives and must be un-linked
+reg [6:0]   ap_pixr;           // its index
 // ---- full-board re-scan (chain rounds 2+) ----
 // Round 1 needs only the 4 lines through the placed cells: a settled parent has no run
 // >= 4 anywhere else. After gravity the surviving cells have moved arbitrarily, so
@@ -479,9 +486,16 @@ always @(posedge clk) begin
 			ap_lk  <= bl_rq;                  // == blink[fwp2]
 			ap_vir <= vir_of[fwp2];
 			ap_i   <= fwp2;
+			st <= S_APPLY_P;
+		end
+		// apply sweep, stage 2: RESOLVE the partner. One 128:1 mux (markb), ending at a
+		// register, so it shares a cycle with nothing else.
+		S_APPLY_P: begin
+			ap_pixr <= ap_pix;
+			ap_unl  <= ap_phas && !markb[ap_pix];
 			st <= S_APPLY2;
 		end
-		// apply sweep, stage 2: WRITE, operands all registered.
+		// apply sweep, stage 3: WRITE, operands all registered.
 		// Clearing a cell also BREAKS THE LINK of a surviving partner: that partner
 		// becomes a loose single and falls on its own. If both halves are marked no
 		// unlink is needed -- they are both about to be blanked.
