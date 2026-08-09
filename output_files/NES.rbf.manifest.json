@@ -1,40 +1,43 @@
 {
   "artifact": {
-    "md5": "be266883c5b79759a615220e457fa3af",
-    "name": "NES.rbf",
-    "size": 3561472
+    "md5": "de7dea35a9fa03a622cccc8068bd935e",
+    "name": "NES_theta400_20260809.rbf",
+    "size": 3565528
   },
   "builder": {
     "argv": [
-      "./run_fit.sh"
+      "./ship_theta400_wrapper.sh"
     ],
-    "file": "run_fit.sh",
-    "md5": "3113124a27e71fdd3d5310c6783ca8cc"
+    "file": "ship_theta400_wrapper.sh",
+    "chain": "ship_theta400_wrapper.sh -> dr-mario-main-wt/experiments/rtl_chain/ship_build.sh 13 theta400 -> run_fit.sh, under systemd unit drm-quartus-theta400 (clean db + incremental_db)"
   },
-  "determinism": "not checked (no rebuild callable supplied)",
+  "determinism": "not re-run (46 min CPU); seed 13 pinned, archive at dr_mario_rl/tmp/rtl_chain/ship/theta400-seed13/ has NES.qsf.used + fit.log; rebuild recipe = re-pin SEED 13, clean flow, expect copro slack +0.391",
   "env": {},
   "git": {
     "branch": "claude/winner-single-copro",
-    "commit": "b49876487189d1833e758edf3641b67f11ebf51e",
-    "dirty": true
+    "commit": "ff1db5aaaf3cce1350a570266a13042fa99d4844",
+    "dirty": false
   },
   "inputs": [
     {
-      "md5": "45e7df6a529f1850af88d37563496a82",
+      "md5": "da3e5e808762f760ddc46c23c88dc96e",
       "path": "rtl/mappers/CoproDrMario.sv"
     },
     {
-      "md5": "751b6ce98faef5a9316b3aa3a53fdf51",
-      "path": "copro_rom.hex"
+      "md5": "5f06209642d1547e99cea077523662dc",
+      "path": "rtl/mappers/LeafEval.sv"
     },
     {
-      "md5": "e72ded56cce66665bd84bb6edc36aea2",
-      "path": "NES.qsf"
+      "md5": "f78f1e9376405dc996404f68dfa9dfb8",
+      "path": "copro_rom.hex",
+      "recipe": "/mnt/data/drmario_cosim/fw/theta_sweep/th400/RECIPE.json: DRSTRAND=20 DRCHAIN=180 DRCOPRO_ARM=1 DRFIX=1 DRCOPRO_TUCKBFS=1 DRCOPRO_TUCKBFS_TIER3=1 DRCOPRO_TUCKV3_FIXSLOT=1 DRCOPRO_TUCKV3_THETA=400"
     }
   ],
   "notes": {
-    "determinism_note": "second 71-min compile not run; commit b498764 is the recipe",
-    "fit": "87% ALM, worst setup slack +0.118, 0 critical warnings",
-    "purpose": "tuck mailbox RTL + firmware 751b6ce9; pair-latch silicon A/B core"
+    "fit": "SHIP AS-IS: ALM 37575/41910 (4335 free); copro slack +0.391 ns (bar +0.10); pll_hdmi +0.051 ns (baseline -0.012); stages Synthesis 3:54 / Fitter 16:57 / Assembler 0:19 / STA 0:14",
+    "fw_in_image_proof": "PERFECT BIJECTION 16/16 one-bit BRAM slices of copro2|rom_rtl_0 == th400 hex (post-fit quartus_eda sim netlist from the same compiled db the assembler serialized). Killed-mutant controls: th150 fails exactly the 3 dose-lane slices (rom[7525] bits 1,2; rom[7531] bit 0), preship f4b6dfbf fails 16/16. Independent link: db/NES.ram0_CoproDrMario_15c5156a.hdl.mif == hex 0/16384 diffs; effective dose word in the image init = 0x0190 = theta 400. Program + output: ship/theta400-seed13/{fw_bijection_proof.py,FW_IN_IMAGE_PROOF.txt}",
+    "update_mif_noop_defense": "db + incremental_db deleted before flow; all 4 stages ran with real elapsed times; zero smart-recompilation lines in flow.rpt; fit/sta reports post-date copro_rom.hex; firmware md5 asserted PRE and POST flow by the wrapper",
+    "distinctness": "md5 unique across 75 known rbfs (repo root sweeps, releases/, rtl_chain ship archives incl. shipped 71d2de37 and quarantined f7d3382a)",
+    "purpose": "theta400 champion candidate: tuck executor dose theta*=400 firmware on the winner single-copro core; pairs with staged cart drmario_tuck_demo_mister.nes (7611d54b)"
   }
 }
