@@ -75,6 +75,11 @@ the image: `rom[7525]=0x90`, `rom[7531]=0x01` → **θ = 0x0190 = 400**. The hal
 also unambiguous (the wrong order mismatches in 12,062 bytes), so a swapped-half
 reconstruction cannot be waved through.
 
+The proof script itself was mutation-tested (a gate that has never been seen to fail is
+not a gate): a 1-bit-flipped th400 hex as EXPECTED → `MISMATCH ... 1/16384 bytes, addr 1234
+hex 60 image 61`, exit 1; th400 passed as its own CONTROL → `IDENTICAL -- CONTROL FAILED`,
+exit 1; the real invocation → exit 0.
+
 Effective flag set follows transitively: the image bytes ARE th400's `copro_rom.hex`, and
 phase 1 re-ran `build_dbgpub.py` from `RECIPE.json` (DRSTRAND=20 DRCHAIN=180 DRCOPRO_ARM=1
 DRFIX=1 DRCOPRO_TUCKBFS=1 DRCOPRO_TUCKBFS_TIER3=1 DRCOPRO_TUCKV3_FIXSLOT=1
