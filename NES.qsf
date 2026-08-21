@@ -302,12 +302,14 @@ set_global_assignment -name SDC_FILE NES.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE NES.sv
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
 
-# respin-144 (2026-08-21): pin pll_hdmi outclk_0 to physical output counter C0.
-# Quartus 23.1's fitter places every divclk at N1; Main's runtime PLL reconfig
-# addresses C counters PHYSICALLY (pll_cfg_hdmi.v C_CNT_0_DIV_ADDR + index) and
-# writes counter 0, so the divider write missed and the divider stayed at the
-# compile-time C=3 (148.5 MHz) regardless of requested mode. Pinning the counter
-# to N0 puts the live divider where the write lands. Gate: fit rpt Output Clock
-# Location must read PLLOUTPUTCOUNTER_X0_Y7_N0 and the assignment must not appear
-# in the Ignored Assignments section.
-set_location_assignment PLLOUTPUTCOUNTER_X0_Y7_N0 -to "pll_hdmi:pll_hdmi|pll_hdmi_0002:pll_hdmi_inst|altera_pll:altera_pll_i|altera_cyclonev_pll:cyclonev_pll|counter[0].output_counter"
+# respin-144 (2026-08-21, take 2): pin pll_hdmi outclk_0 to PHYSICAL COUNTER INDEX 5.
+# The MiSTer-modified reconfig core (sys/pll_cfg/pll_cfg_hdmi.v) hardcodes its C-divider
+# write to DPRIO counter index 5 (c_cnt_changed[5]; addr C_CNT_0_DIV_ADDR+5) -- the
+# Quartus-17-era placement contract. Quartus 23.1's fitter instead placed counter[0]
+# at output_counter_index=7 (NES.vo atom param; location PLLOUTPUTCOUNTER_X0_Y7_N1),
+# so the runtime divider write missed and the divider stayed at compile-time C=3
+# (148.5 MHz) for every requested mode. The location's Y row encodes the counter index
+# on this fPLL band (netlist-verified: X89_Y0/Y5/Y7 = indices 0/5/7); N0 slots are
+# phantom (fitter: "illegal location assignment"). Gate: rebuilt NES.vo must show
+# pll_hdmi ... counter[0].output_counter .output_counter_index = 5.
+set_location_assignment PLLOUTPUTCOUNTER_X0_Y5_N1 -to "pll_hdmi:pll_hdmi|pll_hdmi_0002:pll_hdmi_inst|altera_pll:altera_pll_i|altera_cyclonev_pll:cyclonev_pll|counter[0].output_counter"
