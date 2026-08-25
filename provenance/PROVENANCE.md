@@ -1,4 +1,10 @@
-# Canon winner core — AS-BUILT provenance record
+# NES_MiSTer-winner working tree — preserved unversioned state
+
+> ⚠ **CORRECTED 2026-08-25.** This file first called its contents the
+> "AS-BUILT configuration for the shipped winner core". **That was wrong**,
+> and the correction is recorded in full below rather than quietly edited
+> out. "As-built" is a claim about a PAIRING — *this config produced that
+> artifact* — and a pairing needs evidence, not proximity in a directory.
 
 **Preserved 2026-08-25.** This branch is a RECORD, not a proposal. It changes no
 build and asks for no merge.
@@ -124,3 +130,67 @@ compare against the shipped bitstream's md5 (`caa5b5c6…`, seed 13) — roughly
 20-minute fit that nobody has run. Until someone does, the honest statement is
 **"the inputs are verified complete; the output is unverified"**, not "the core
 is reproducible".
+
+
+---
+
+# ★ CORRECTION — what these artifacts actually pair with
+
+The original framing slid from "uncommitted settings in the tree that holds the
+bitstreams" to "the as-built settings for the shipped core". Timestamps refute
+it. There are **four distinct epochs** in this one directory, and they had been
+read as one story:
+
+| when | artifact | its config | its numbers |
+|---|---|---|---|
+| **Aug 5 21:35** | `NES_stomper180s20t3_20260805_seed13.rbf` (`caa5b5c6`) | **LOST** — overwritten in place | `SEED_SWEEP_TABLE.csv` (Aug 5 22:14) is **this** campaign's table: seed 13 `+0.051` |
+| **Aug 9 09:33** | `NES_theta400_20260809.rbf` (`de7dea35`) | `THETA400_BUILD.md` cites `NES.qsf.used` — **NOT PRESENT** in the tree or in git history | RTL commit `ff1db5aa`, seed 13, tracked at `b20864a` |
+| **Aug 21 13:52** | `output_files/NES.rbf` (`4bcd7428`) + `NES.sof` — **gitignored** | HEAD `08f2343` + the qsf *as it stood at 13:52* | `output_files/` is **this** build's: 90% ALM, binding clk85 **+0.165** |
+| **Aug 21 14:20** | — | **the qsf preserved here** = the 13:52 config **plus** the EDA netlist-writer lines, appended *after* the fit | — |
+
+## What this file therefore is, precisely
+
+**The winner tree's working configuration as of 2026-08-21 14:20**, preserved
+because it exists in no repository. It is **not** the as-built config of any
+specific shipped bitstream:
+
+* It is **not** the stomper (Aug 5) config. That bitstream predates this qsf by
+  16 days and predates HEAD itself. **Its configuration appears to be lost** —
+  overwritten in place, recoverable from no repository. An honest "this is
+  gone" is worth more than an unearned "as-built".
+* It is **not exactly** the config that produced the Aug-21 timing either. The
+  EDA netlist-writer lines were added at 14:20, *after* the 13:52 fit
+  (`NES.flow.rpt` shares the 14:20:54 mtime; the EDA step ran then). Those
+  settings do not affect fitting, so the reports here still belong to that
+  compile — but the pairing is "config + a later EDA-only edit", not identity.
+
+## Two numbers that are NOT one baseline
+
+`90% ALM / binding clk85 +0.165 ns` (Aug 21) and `seed 13 closed at +0.051`
+(Aug 5) come from **different builds, 16 days and an unknown number of
+revisions apart**. They had been quoted together as a single reference. Neither
+is a control for any current build, and they are not controls for each other.
+
+## Which artifact is canon? — UNRESOLVED, and that is the finding
+
+* On the **lab box (10.42.0.225)** the Dr. Mario `.mgl` files load
+  `_Console/NES_20990101.rbf`, md5 **`7a538f75…`**. That md5 matches **no
+  bitstream we hold** — searched 327 `.rbf` files across 7 local trees
+  (`NES_MiSTer-winner`, its `releases/`, `NES_MiSTer`, the llapi port,
+  `rbf_backup`, `mister`, `mister-adhoc`). **The core our carts actually boot
+  is unaccounted for.**
+* The SD also carries `caa5b5c6` (stomper seed 13) and `de7dea35` (theta400)
+  among eight NES cores, so mere presence identifies nothing.
+* The owner's TV box (10.42.0.233) is off-limits, so **nothing here says what is
+  deployed there** — and if "canon" means that box, this record cannot answer it.
+
+⇒ Do not describe any of these as "the shipped winner core" until someone
+establishes which bitstream is actually deployed and on which box.
+
+## What is still true, and why this branch remains worth having
+
+The 28-item ignored/untracked layer captured here existed in **no repository**
+and was one `git clean` from gone, regardless of which build it pairs with. The
+input-completeness check also stands on its own: a clean checkout of `08f2343`
+resolves 98/98 references (102/102 with this qsf). The defect was in the
+**label**, not the content.

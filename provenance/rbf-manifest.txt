@@ -5,3 +5,14 @@ caa5b5c669017dac7e14e82b8e94a722     3565508  NES_stomper180s20t3_20260805_seed1
 1da3d05756f32e98c0e3cbcec034111a     3500176  NES_stomper180s20t3_20260805_seed7_TIMINGFAIL.rbf
 529ada5d3a41e271dd50241fdd364e8c     3552832  NES_stomper180s20t3_20260805_seed9_TIMINGFAIL.rbf
 de7dea35a9fa03a622cccc8068bd935e     3565528  NES_theta400_20260809.rbf
+
+# ADDED 2026-08-25 on re-audit — these were MISSED by a root-level *.rbf glob.
+# They are the Aug-21 respin-144 build's OWN output, gitignored under
+# output_files/, and they are the bitstreams that actually pair with HEAD
+# 08f2343 and with the timing reports preserved here.
+4bcd7428b6fe14143e04801863c1f46d  3531888  output_files/NES.rbf  (Aug-21 respin-144, GITIGNORED, still only on that box)
+a2a2e95f227cb3ffb99c942f7f2b7616  6698048  output_files/NES.sof  (same compile)
+
+# The core the Dr. Mario .mgl files actually LOAD on the lab box (.225):
+7a538f755a32649eaaf237f99ffcdf85  ?  /media/fat/_Console/NES_20990101.rbf
+#   -> matches NO bitstream we hold: searched 327 .rbf across 7 local trees.
