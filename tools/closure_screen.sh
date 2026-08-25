@@ -21,6 +21,16 @@ QSH="$HOME/intelFPGA_lite/23.1std/quartus/bin/quartus_sh"
 [ "$(basename "$HERE")" = "NES_MiSTer-boardtap" ] || {
   echo "REFUSING: not in the boardtap worktree (got $HERE)" >&2; exit 3; }
 
+# ★ Gate on the ACTUAL condition, not a wall-clock guess at when it happens:
+# drm-h16-guard.service is the arm that holds the 4 workers we are waiting on.
+# Read-only check; this script never touches any drm-h16* unit.
+if [ "${FORCE:-0}" != "1" ] \
+   && systemctl --user is-active --quiet drm-h16-guard.service 2>/dev/null; then
+  echo "REFUSING: drm-h16-guard.service is still ACTIVE — its 4 workers are not free yet." >&2
+  echo "  That arm, not the clock, is what releases the cores. Waiting." >&2
+  exit 6
+fi
+
 load=$(cut -d' ' -f1 /proc/loadavg)
 if [ "${FORCE:-0}" != "1" ] && \
    awk -v l="$load" -v m="$MAXLOAD" 'BEGIN{exit !(l>m)}'; then
