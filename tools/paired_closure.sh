@@ -108,16 +108,27 @@ fi
 [ -x "$QSH" ] || die "no quartus_sh at $QSH" 2
 [ -d "$Bl" ]  || die "baseline worktree missing: $Bl" 3
 
+set_seed() { sed -i "s/^set_global_assignment -name SEED .*/set_global_assignment -name SEED $SEED/" "$1/NES.qsf"; }
+
 run_fit() {   # $1 = worktree, $2 = label
   local d="$1" label="$2"
   cd "$d" || return 1
-  sed -i "s/^set_global_assignment -name SEED .*/set_global_assignment -name SEED $SEED/" NES.qsf
   echo "== $label: START $(date -Is)  (seed $SEED, $d)"
   nice -n 19 "$QSH" --flow compile NES > "closure_${label}.log" 2>&1
   echo "== $label: END   $(date -Is)"
 }
 
 echo "### PAIRED CLOSURE SCREEN — seed $SEED — $(date -Is)"
+
+# Pin the seed in BOTH first, then audit BEFORE spending 40 min: a settings
+# mismatch discovered afterwards costs the whole window, and the pair's only
+# value is that settings are held constant.
+set_seed "$A"; set_seed "$Bl"
+if ! "$A/tools/settings_audit.sh"; then
+  die "ABORTING BEFORE THE FITS: settings audit failed — the pair would not be controlled." 8
+fi
+echo
+
 run_fit "$A"  "boardtap"
 run_fit "$Bl" "baseline"
 
@@ -127,6 +138,9 @@ python3 "$A/tools/fit_report.py" "FIT A — HEAD + BoardTap (seed $SEED)" \
 echo
 python3 "$A/tools/fit_report.py" "FIT B — HEAD without BoardTap, CONTROL (seed $SEED)" \
   "$Bl/output_files/NES.sta.rpt" "$Bl/output_files/NES.fit.summary"
+echo
+echo
+"$A/tools/settings_audit.sh" || echo "*** settings drifted DURING the run ***"
 echo
 echo "Reference only (older revision, NOT a control): seed 13 closed at +0.051 in"
 echo "SEED_SWEEP_TABLE.csv; the Aug-21 canon build bound on clk85 at +0.165."
