@@ -21,8 +21,14 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fit_report import parse, name_clock          # noqa: E402
 
-AUG21 = ("Aug-21 canon build: binding clk85 +0.165 ns, 37,664/41,910 = 90%. "
-         "SEED_SWEEP_TABLE.csv: seed 13 closed at +0.051.")
+# ⚠ These are TWO DIFFERENT BUILDS, 16 days apart, and were previously quoted
+# as one baseline. Neither is a control for a current fit, and they are not
+# controls for each other. B (the paired control) is the only control here.
+AUG21 = ("Aug-21 respin-144 build (HEAD 08f2343): binding clk85 +0.165 ns, "
+         "37,664/41,910 = 90% ALM. | SEPARATELY, SEED_SWEEP_TABLE.csv is the "
+         "Aug-5 STOMPER campaign, a different revision whose config is lost: "
+         "seed 13 closed at +0.051 ns. Different builds — do not read as one "
+         "baseline.")
 
 
 def binding(rows):
