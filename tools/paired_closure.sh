@@ -114,7 +114,11 @@ run_fit() {   # $1 = worktree, $2 = label
   local d="$1" label="$2"
   cd "$d" || return 1
   echo "== $label: START $(date -Is)  (seed $SEED, $d)"
-  nice -n 19 "$QSH" --flow compile NES > "closure_${label}.log" 2>&1
+  if [ "${DRYRUN:-0}" = "1" ]; then
+    echo "   DRYRUN: would run  nice -n 19 $QSH --flow compile NES   in $d"
+  else
+    nice -n 19 "$QSH" --flow compile NES > "closure_${label}.log" 2>&1
+  fi
   echo "== $label: END   $(date -Is)"
 }
 
