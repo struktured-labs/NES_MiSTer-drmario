@@ -23,6 +23,8 @@ module cart_top (
 	input             paused,         // This indicates the core is paused so anything using the master clock won't get messed up
 	input             reset,
 	input      [63:0] flags,          // Misc flags from ines header {prg_size(3), chr_size(3), mapper(8)}
+	output            tap_tx,         // BoardTap UART out (Dr. Mario copro board snapshot)
+	output            tap_overrun,    // BoardTap dropped a packet
 	input      [15:0] prg_ain,        // Better known as "CPU Address in"
 	output reg [24:0] prg_aout,       // PRG Input / Output Address Lines ([25:22] extended Lines [Misc ROM])
 	input             prg_read,       // PRG Read / write signals
@@ -2445,7 +2447,9 @@ CoproDrMario #(.WIN(7'b0101_001)) copro2(
 	.prg_write(prg_write),
 	.prg_din  (prg_din),
 	.prg_dout (copro2_dout),
-	.copro_sel(copro2_sel)
+	.copro_sel(copro2_sel),
+	.tap_tx   (tap_tx),
+	.tap_overrun(tap_overrun)
 );
 
 always @* begin

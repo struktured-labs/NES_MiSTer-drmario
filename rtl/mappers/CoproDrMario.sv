@@ -29,7 +29,9 @@ module CoproDrMario #(parameter [6:0] WIN = 7'b0101_000) (   // WIN = prg_ain[15
 	input         prg_write,
 	input   [7:0] prg_din,
 	output  [7:0] prg_dout,   // valid when copro_sel && prg_read (cart_top overrides)
-	output        copro_sel   // host window hit (WIN: copro1=$5000-$51FF, copro2=$5200-$53FF)
+	output        copro_sel,  // host window hit (WIN: copro1=$5000-$51FF, copro2=$5200-$53FF)
+	output        tap_tx,     // BoardTap UART line (board snapshot out)
+	output        tap_overrun // BoardTap dropped a packet (GO during send)
 );
 
 assign copro_sel = enable && (prg_ain[15:9] == WIN);   // window-relative offset = prg_ain[8:0]
@@ -257,5 +259,13 @@ always @(posedge clk) begin
 end
 
 assign prg_dout = ram_b_q;
+
+// ------------------------------------------------------- board tap (clk domain)
+// Snoops the SAME host-write signals sampled above. Nothing here touches clk_cpu,
+// which STA reports as the binding clock (+0.165 ns vs +3.007 ns on clk).
+BoardTap tap(
+	.clk(clk), .ce(ce), .prg_write(prg_write), .copro_sel(copro_sel),
+	.off(prg_ain[8:0]), .din(prg_din), .tx(tap_tx), .overrun(tap_overrun)
+);
 
 endmodule

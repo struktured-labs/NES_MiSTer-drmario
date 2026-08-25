@@ -74,6 +74,8 @@ endmodule
 module NES(
 	input         clk,
 	input         clk85,           // coprocessor fast clock (pass-through to cart_top)
+	output        tap_tx,          // BoardTap UART out (pass-through from cart_top)
+	output        tap_overrun,     // BoardTap dropped a packet
 	input         reset_nes,
 	input         ppu_rst_behavior,
 	input         cold_reset,
@@ -661,6 +663,8 @@ cart_top multi_mapper (
 	// FPGA specific
 	.clk               (clk),
 	.clk85             (clk85),
+	.tap_tx            (tap_tx),
+	.tap_overrun       (tap_overrun),
 	.reset             (reset_noSS),
 	.flags             (mapper_flags),            // iNES header data (use 0 while loading)
 	.paused            (freeze_clocks),

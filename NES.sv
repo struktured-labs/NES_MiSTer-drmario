@@ -25,7 +25,12 @@ assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
 assign VGA_F1 = 0;
-//assign {UART_RTS, UART_TXD, UART_DTR} = 0;
+// BoardTap publishes the copro's board snapshot on the core's UART line, which
+// MiSTer already exposes to Linux (the daemon configures ttyS1 for this core's
+// CONF_STR UART entry). RTS/DTR stay parked.
+wire tap_tx, tap_overrun;
+assign {UART_RTS, UART_DTR} = 0;
+assign UART_TXD = tap_tx;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 wire [1:0] ar       = status[19:18];
@@ -720,6 +725,8 @@ wire nes_hblank, nes_hsync, nes_vsync, nes_vblank;
 NES nes (
 	.clk             (clk),
 	.clk85           (clk85),
+	.tap_tx          (tap_tx),
+	.tap_overrun     (tap_overrun),
 	.reset_nes       (reset_nes),
 	.ppu_rst_behavior(status[64]),
 	.cold_reset      (downloading & (type_fds | type_nes)),
