@@ -143,8 +143,15 @@ echo
 python3 "$A/tools/fit_report.py" "FIT B — HEAD without BoardTap, CONTROL (seed $SEED)" \
   "$Bl/output_files/NES.sta.rpt" "$Bl/output_files/NES.fit.summary"
 echo
+# The adjudication: binding clock named per fit, settings confirmed constant,
+# and the A-B delta stated as the answer with the Aug-21 table labelled a
+# non-comparable reference. Outcome rules are fixed in the tool in advance, so
+# the reading is not chosen after seeing the numbers.
+python3 "$A/tools/paired_verdict.py" \
+  "$A/output_files/NES.sta.rpt"  "$A/output_files/NES.fit.summary" \
+  "$Bl/output_files/NES.sta.rpt" "$Bl/output_files/NES.fit.summary" \
+  "$A/tools/settings_audit.sh"
+VERDICT_RC=$?
 echo
-"$A/tools/settings_audit.sh" || echo "*** settings drifted DURING the run ***"
-echo
-echo "Reference only (older revision, NOT a control): seed 13 closed at +0.051 in"
-echo "SEED_SWEEP_TABLE.csv; the Aug-21 canon build bound on clk85 at +0.165."
+echo "verdict rc=$VERDICT_RC  (0 GO · 1 honest NO · 2 anomaly · 3 no data · 4 about HEAD)"
+exit "$VERDICT_RC"
