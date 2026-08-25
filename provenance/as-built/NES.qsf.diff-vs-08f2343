@@ -1,0 +1,17 @@
+diff --git a/NES.qsf b/NES.qsf
+index 4dd687a..843ac1e 100644
+--- a/NES.qsf
++++ b/NES.qsf
+@@ -313,3 +313,11 @@ set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_
+ # phantom (fitter: "illegal location assignment"). Gate: rebuilt NES.vo must show
+ # pll_hdmi ... counter[0].output_counter .output_counter_index = 5.
+ set_location_assignment PLLOUTPUTCOUNTER_X0_Y5_N1 -to "pll_hdmi:pll_hdmi|pll_hdmi_0002:pll_hdmi_inst|altera_pll:altera_pll_i|altera_cyclonev_pll:cyclonev_pll|counter[0].output_counter"
++
++set_global_assignment -name EDA_SIMULATION_TOOL "QuestaSim (Verilog)"
++set_global_assignment -name EDA_OUTPUT_DATA_FORMAT "VERILOG HDL" -section_id eda_simulation
++set_global_assignment -name SYSTEMVERILOG_FILE rtl/mappers/CoproDrMario.sv
++set_global_assignment -name SYSTEMVERILOG_FILE rtl/mappers/LeafEval.sv
++set_global_assignment -name VERILOG_FILE rtl/mappers/copro6502.v
++set_global_assignment -name VERILOG_FILE rtl/mappers/copro_alu.v
++set_global_assignment -name EDA_NETLIST_WRITER_OUTPUT_DIR output_files/simnet -section_id eda_simulation
+\ No newline at end of file

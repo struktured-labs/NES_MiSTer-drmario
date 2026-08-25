@@ -1,0 +1,26 @@
+fw-guard PRE : copro_rom.hex f78f1e9376405dc996404f68dfa9dfb8 OK
+== ship build: seed 13, RTL ff1db5a ==
+Fitter status : Successful - Sun Aug  9 09:25:37 2026
+ALMs          : 37575 / 41910  (4335 free)   PASS
+copro slack   : 0.391 ns (bar +0.10)   PASS
+pll_hdmi      : 0.051 ns (baseline -0.012)   PASS
+
+VERDICT: SHIP AS-IS -- all three criteria met; BRAM conversion (#27) not needed.
+distinctness: rbf de7dea35a9fa03a622cccc8068bd935e is unique across 3 archived builds
+
+archived: /home/struktured/projects/dr_mario_rl/tmp/rtl_chain/ship/theta400-seed13
+CoproDrMario.sv
+LeafEval.sv
+NES.fit.rpt
+NES.fit.summary
+NES.qsf.used
+NES.rbf
+NES.sof
+NES.sta.rpt
+NES.sta.summary
+copro_rom.hex
+fit.log
+manifest.json
+verdict.txt
+fw-guard POST: copro_rom.hex f78f1e9376405dc996404f68dfa9dfb8 OK
+WRAPPER EXIT rc=0

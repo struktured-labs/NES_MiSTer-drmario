@@ -1,0 +1,17 @@
+SEED 11: launching fit
+SEED 11 RESULT: MISS slack=-0.060ns path=[Type  : Setup 'emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk'] total_misses=3
+SEED 13: launching fit
+SEED 13 RESULT: CLOSED-BUT-MARGINAL slack=0.051ns hash=caa5b5c669017dac7e14e82b8e94a722 path=[Type  : Setup 'pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk'] -- continuing sweep for headroom
+SEED 15: launching fit
+SEED 15 RESULT: MISS slack=-0.504ns path=[Type  : Setup 'pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk'] total_misses=4
+SEED 17: launching fit
+SEED 17 RESULT: MISS slack=-0.132ns path=[Type  : Setup 'pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk'] total_misses=5
+SWEEP STOPPED: 5 total misses -- recommend decision (tier-2 fallback vs RTL/timing-constraint look), not further seed-hunting
+SWEEP LOOP DONE
+seed,slack_ns,tns_ns,verdict
+7,-0.074,-0.138,MISS
+9,-0.020,-0.114,MISS
+11,-0.060,-0.217,MISS
+13,0.051,0.000,CLOSED-BUT-MARGINAL
+15,-0.504,-20.288,MISS
+17,-0.132,-1.257,MISS
