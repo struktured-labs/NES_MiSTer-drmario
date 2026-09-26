@@ -321,7 +321,16 @@ reg  [4:0] maxh /*verilator public_flat_rd*/;
 reg  [7:0] holes /*verilator public_flat_rd*/, toprisk /*verilator public_flat_rd*/, spawn /*verilator public_flat_rd*/, setup /*verilator public_flat_rd*/;
 reg [10:0] pollution /*verilator public_flat_rd*/;   // up to 48 viruses x 22 cells = 1056
 reg  [9:0] buried /*verilator public_flat_rd*/;   // up to 48 x 15 = 720
+`ifdef DRHSV
+// DRHSV (STEER5b/5c, 2026-09-26): the matched60 accumulator also carries the HSV leaf term, -512 per virus in
+// columns 3..5 at row < 9 ("clear the HIGH spawn-column viruses first"). Range -13,824..+2,304 -> 15-bit two's
+// complement; sign-extended into the S_DONE2 combine. No new combine input (no pipeline stage). The CMD 6/7 delta
+// path needs no change: a non-clearing child never changes a virus cell, so its HSV == the parent's, which rides
+// base_matched (latched from the parent's full S_COLWALK), and dd_matched stays the closed-form +48 covers.
+reg [14:0] matched60 /*verilator public_flat_rd*/; // R6 matched-cover +48 per covered virus, DRHSV -512 per high spawn-column virus
+`else
 reg [12:0] matched60 /*verilator public_flat_rd*/; // R6 matched-cover pre-scaled: +48 per virus w/ same-color cover directly on top (name historical; was +60)
+`endif
 reg [15:0] rdy_ext /*verilator public_flat_rd*/, vrdy /*verilator public_flat_rd*/;
 reg        anyvir;
 reg        seen;               // column walk: first-occupied seen
@@ -331,7 +340,11 @@ reg  [4:0] curlen;            // non-virus cover run ending at the previous cell
 reg  [4:0] vseen;             // R7b: viruses seen so far this column (buried charge caps at 2)
 // combine-pipeline: registered multiplier inputs (S_DONE stage1) -> combine in S_DONE2
 reg  [4:0] maxh_p; reg [7:0] holes_p, toprisk_p, spawn_p, setup_p;
+`ifdef DRHSV
+reg [10:0] pollution_p; reg [9:0] buried_p; reg [15:0] rdy_ext_p, vrdy_p; reg [14:0] matched60_p;
+`else
 reg [10:0] pollution_p; reg [9:0] buried_p; reg [15:0] rdy_ext_p, vrdy_p; reg [12:0] matched60_p;
+`endif
 
 // ---- incremental delta engine (CMD 6 = BASE latch, CMD 7 = DELTA child) ----
 reg        base_mode;                 // CMD 6: latch base_* instead of driving sco
@@ -341,7 +354,11 @@ reg  [4:0] base_maxh /*verilator public_flat_rd*/;
 reg  [7:0] base_holes /*verilator public_flat_rd*/, base_toprisk, base_spawn, base_setup;
 reg [10:0] base_pol;
 reg  [9:0] base_buried;
+`ifdef DRHSV
+reg [14:0] base_matched;              // DRHSV: carries the parent's HSV into every CMD 7 child
+`else
 reg [12:0] base_matched;
+`endif
 reg [15:0] base_rdy, base_vrdy;
 reg        base_anyvir;
 // delta accumulators: new_total = base - old_local + new_local
@@ -732,7 +749,13 @@ always @(posedge clk) begin
 					anyvir <= 1'b1;
 					// R6 matched-cover setup: a same-color non-virus cell resting directly on the virus
 					// (== the R1 exemption condition) counts a started vertical clear.
+`ifdef DRHSV
+					// DRHSV: one accumulate site for both terms (two NBAs to matched60 in one cycle would drop one).
+					matched60 <= matched60 + ((curcol == col_of[{wr_[3:0], wc[2:0]}]) ? 15'd48 : 15'd0)
+					                       - ((wr_ < 4'd9 && (wc == 4'd3 || wc == 4'd4 || wc == 4'd5)) ? 15'd512 : 15'd0);
+`else
 					if (curcol == col_of[{wr_[3:0], wc[2:0]}]) matched60 <= matched60 + 13'd48;
+`endif
 					// R1 color-aware buried; R7b: charge only the 2 topmost viruses in the column.
 					if (vseen < 5'd2)
 						buried <= buried + fillcnt - ((curcol == col_of[{wr_[3:0], wc[2:0]}]) ? curlen : 5'd0);
@@ -942,7 +965,11 @@ always @(posedge clk) begin
 			     - 16'd90  * toprisk_p
 			     - 16'd150 * spawn_p
 			     + 16'd32  * setup_p
+`ifdef DRHSV
+			     + {matched60_p[14], matched60_p}      // DRHSV: sign-extend the 15-bit two's complement term
+`else
 			     + matched60_p
+`endif
 			     - 16'd48  * buried_p
 			     + 16'd8   * rdy_ext_p
 			     + 16'd8   * vrdy_p
