@@ -415,6 +415,16 @@ reg  [6:0] vo;                 // current virus bcell offset
 wire [3:0] v_r = vo[6:3];
 wire [2:0] v_c = vo[2:0];
 wire [1:0] v_col = col_of[vo];
+`ifdef DRLEV_VNPF
+// DRLEV_VNPF (timing fallback for the DRHSV fit, 2026-09-26): S_VNEXT's "is cell vo a virus" test is a 128:1 read of
+// the register-file board that fans out to the enables of run_h/run_v (-> the sq() DSP ENA), p, vo, wr_, wc and st --
+// seed 2's worst class (bcell -> vir_of -> Mux51 -> run_v/wr_/wc/DSP ENA, -0.808 ns). PREFETCH it into a flop instead.
+// Exact: every edge that enters (or stays in) S_VNEXT loads vo with 0 (from S_COLWALK) or vo+1 (from S_VNEXT/S_VFIN),
+// and the leaf walk never writes bcell (host writes only land while idle), so vir_of of that NEXT vo, sampled at the
+// same edge, equals vir_of[vo] throughout the S_VNEXT cycle. Zero added cycles.
+reg  vn_hit;
+always @(posedge clk) vn_hit <= (st == S_COLWALK) ? vir_of[7'd0] : vir_of[vo + 7'd1];
+`endif
 
 reg  [4:0] run_h, run_v;       // same-color runs through the virus
 `ifdef DRLEV_SQREG
@@ -836,7 +846,11 @@ always @(posedge clk) begin
 
 		// ---- per-virus terms: iterate all cells, process viruses
 		S_VNEXT: begin
+`ifdef DRLEV_VNPF
+			if (vn_hit) begin                             // DRLEV_VNPF: == vir_of[vo], prefetched (see decl)
+`else
 			if (vir_of[vo]) begin
+`endif
 				run_h <= 1; run_v <= 1;
 				p <= {2'b0, v_c};      // horizontal left walk from c-1
 				st <= S_HRUN_L;
