@@ -145,13 +145,35 @@ wire [6:0] ap_pix  = (ap_lk == LK_UP)   ? ap_i - 7'd8
 reg  [6:0] bl_wa;
 reg  [2:0] bl_wd;
 reg        bl_we;
+`ifdef DRLEV_WRREG
+// DRLEV_WRREG (timing fallback for the DRHSV fit, 2026-09-26): the host board-window write (CPU bus decode ->
+// 128-way bcell/link/slot write) is REGISTERED one clk_cpu before it lands. Worst paths at seed 13 were
+// copro6502 state -> bcell (18 of the 30 worst). Safe: a 6502 store is the LAST cycle of its instruction and the
+// next bus write/CMD is >= 3 cycles later, so the delayed write always lands while the FSM is still idle (the
+// funnel's "host write only fires while idle" invariant holds) and before any engine read of the cell.
+// Zero engine cycles per node. Firmware co-sim (real copro6502 + fw 77ec742c, 69 real boards): moves AND GO->DONE
+// clocks identical to the unregistered write, board for board.
+reg        h_wr;
+reg  [6:0] h_waddr;
+reg  [2:0] h_wdata, h_wlnk;
+reg  [1:0] h_wslot;
+always @(posedge clk) begin
+	h_wr <= rst ? 1'b0 : wr; h_waddr <= waddr; h_wdata <= wdata; h_wlnk <= wlnk; h_wslot <= wslot;
+end
+`endif
 always @* begin
 	bl_we = 1'b0; bl_wa = 7'd0; bl_wd = LK_NONE;
 	// The host window write only ever fires while the FSM is idle, so priority between
 	// the two is moot; giving it first refusal keeps the arms below mutually exclusive.
+`ifdef DRLEV_WRREG
+	if (h_wr && h_wslot == 2'd0) begin
+		bl_we = 1'b1; bl_wa = h_waddr; bl_wd = h_wlnk;
+	end else case (st)
+`else
 	if (wr && wslot == 2'd0) begin
 		bl_we = 1'b1; bl_wa = waddr; bl_wd = wlnk;
 	end else case (st)
+`endif
 	S_CP_R:     begin bl_we = 1'b1; bl_wa = fwp2;  bl_wd = sl_qb[5:3]; end
 	S_PLACE:    begin bl_we = 1'b1; bl_wa = off_a; bl_wd = a_o4[1] ? LK_RIGHT : LK_DOWN; end
 	S_PLACE_B:  begin bl_we = 1'b1; bl_wa = off_b; bl_wd = a_o4[1] ? LK_LEFT  : LK_UP;  end
@@ -173,11 +195,20 @@ end
 // along in bits [5:3] for FREE -- no extra BRAM, no second RAM, no wider address.
 reg  [8:0] sr_addr;
 reg  [6:0] cpw_p;
+`ifdef DRLEV_WRREG
+wire [8:0] sr_waddr = {h_wslot, h_waddr};
+wire       sl_we    = (h_wr && h_wslot != 2'd0) || sl_cpw;
+`else
 wire [8:0] sr_waddr = {wslot, waddr};
 wire       sl_we    = (wr && wslot != 2'd0) || sl_cpw;
+`endif
 reg        sl_cpw;                    // S_CP_W write strobe
 wire [8:0] sl_wa    = sl_cpw ? {a_sl, cpw_p} : sr_waddr;
+`ifdef DRLEV_WRREG
+wire [7:0] sl_wd    = sl_cpw ? {2'd0, bl_rq, bcell[cpw_p]} : {2'd0, h_wlnk, h_wdata};
+`else
 wire [7:0] sl_wd    = sl_cpw ? {2'd0, bl_rq, bcell[cpw_p]} : {2'd0, wlnk, wdata};
+`endif
 wire [7:0] sl_qb;
 wire [2:0] slotq = sl_qb[2:0];
 dpram #(.widthad_a(9), .width_a(8)) slotram (
@@ -386,6 +417,17 @@ wire [2:0] v_c = vo[2:0];
 wire [1:0] v_col = col_of[vo];
 
 reg  [4:0] run_h, run_v;       // same-color runs through the virus
+`ifdef DRLEV_SQREG
+// DRLEV_SQREG (timing fallback for the DRHSV fit, 2026-09-26): Quartus packed run_h/run_v INTO the sq() DSP input
+// registers, so the walk's per-cycle update decision (bcell -> vir_of -> 128:1 cell mux -> enable) had to reach the
+// DSP ENA pin -- the seed-13 worst path (bcell -> Mult5/Mult6 ENA_DFF0, -0.494 ns). These copies load EVERY cycle
+// (no enable), so the DSP input registers become enable-free copies. No extra latency: run_h/run_v stop changing
+// >= 2 cycles before sq() is read (S_VRUN_D no-increment -> S_VSPAN_D -> S_VFIN/S_DRVFIN), so the copy is exact.
+// Measured by the bitexact gate: a 2-deep copy still passes, a 3-deep copy fails PHASE3 (delta S_DRVFIN), so the
+// margin is exactly 2 clk on the delta path and this 1-deep copy sits inside it.
+reg  [4:0] sq_h_in, sq_v_in;
+always @(posedge clk) begin sq_h_in <= run_h; sq_v_in <= run_v; end
+`endif
 reg  [4:0] p;                  // walk pointer (row 0..15 or col 0..7 as needed)
 reg  [4:0] span_lo, span_hi;   // span bounds (exclusive), horizontal: -1..8 as 5-bit signed-ish
 reg  [4:0] vspan_lo, vspan_hi;
@@ -400,9 +442,15 @@ always @(posedge clk) begin
 		st <= S_IDLE; done <= 1'b0; sl_cpw <= 1'b0;
 		base_mode <= 1'b0; delta_mode <= 1'b0; dv_fallback <= 1'b0;
 	end else begin
+`ifdef DRLEV_WRREG
+		if (h_wr && h_wslot == 2'd0) begin                // DRLEV_WRREG: the registered host write
+			bcell[h_waddr] <= h_wdata;
+		end
+`else
 		if (wr && wslot == 2'd0) begin                    // slot writes go via the dpram port
 			bcell[waddr] <= wdata;   // its link goes through the write port below
 		end
+`endif
 		if (bl_we) blink[bl_wa] <= bl_wd;      // THE link-plane write port (see funnel above)
 		case (st)
 		S_IDLE: if (start || cmd_go) begin
@@ -885,11 +933,19 @@ always @(posedge clk) begin
 				reg [8:0] hq, vq, mx;
 				// python gates on (hi - lo - 1) >= 4 with EXCLUSIVE blocker endpoints;
 				// span_lo/hi here are INCLUSIVE span cells -> width = hi - lo + 1.
+`ifdef DRLEV_SQREG
+				hq = ((span_hi  - span_lo  + 5'd1) >= 5'd4) ? sq(sq_h_in) : 9'd0;
+				vq = ((vspan_hi - vspan_lo + 5'd1) >= 5'd4) ? sq(sq_v_in) : 9'd0;
+				mx = (hq > vq) ? hq : vq;
+				rdy_ext <= rdy_ext + mx;
+				vrdy    <= vrdy + sq(sq_v_in);
+`else
 				hq = ((span_hi  - span_lo  + 5'd1) >= 5'd4) ? sq(run_h) : 9'd0;
 				vq = ((vspan_hi - vspan_lo + 5'd1) >= 5'd4) ? sq(run_v) : 9'd0;
 				mx = (hq > vq) ? hq : vq;
 				rdy_ext <= rdy_ext + mx;
 				vrdy    <= vrdy + sq(run_v);
+`endif
 			end
 			if (vo == 7'd127) begin
 				wc <= 0; wr_ <= 0; st <= S_SETUP_H;
@@ -1107,11 +1163,21 @@ always @(posedge clk) begin
 		end
 		S_DRVFIN: begin : drvfin
 			reg [8:0] hq, vq, mx;
+`ifdef DRLEV_SQREG
+			hq = ((span_hi  - span_lo  + 5'd1) >= 5'd4) ? sq(sq_h_in) : 9'd0;
+			vq = ((vspan_hi - vspan_lo + 5'd1) >= 5'd4) ? sq(sq_v_in) : 9'd0;
+`else
 			hq = ((span_hi  - span_lo  + 5'd1) >= 5'd4) ? sq(run_h) : 9'd0;
 			vq = ((vspan_hi - vspan_lo + 5'd1) >= 5'd4) ? sq(run_v) : 9'd0;
+`endif
 			mx = (hq > vq) ? hq : vq;
+`ifdef DRLEV_SQREG
+			if (dphase == 2'd1) begin nd_rdy <= nd_rdy + {7'd0, mx}; nd_vrdy <= nd_vrdy + {7'd0, sq(sq_v_in)}; end
+			else                begin od_rdy <= od_rdy + {7'd0, mx}; od_vrdy <= od_vrdy + {7'd0, sq(sq_v_in)}; end
+`else
 			if (dphase == 2'd1) begin nd_rdy <= nd_rdy + {7'd0, mx}; nd_vrdy <= nd_vrdy + {7'd0, sq(run_v)}; end
 			else                begin od_rdy <= od_rdy + {7'd0, mx}; od_vrdy <= od_vrdy + {7'd0, sq(run_v)}; end
+`endif
 			st <= S_DADV;
 		end
 
