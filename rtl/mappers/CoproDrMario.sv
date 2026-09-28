@@ -108,6 +108,16 @@ reg  [2:0] lev_a_col;
 // shipped recipe under experiments/rtl_chain/ship/stomper180-seed2/.
 reg        lev_a_fix = 1'b0;   // $70E5: 0 = one clear round (lnk1), 1 = resolve to fixpoint
 reg  [7:0] lev_a_chw = 8'd0;   // $70E6: DRCHAIN dose / 4 (0 = no chain reward)
+`ifdef DRDIST
+// DRDIST (STEER6b dist_target60, 2026-09-28): $70F5 W = the firmware-chosen ENDGAME TARGET virus for this decision,
+// bit 7 = valid, [6:0] = cell index r*8+c. CLEARED BY THE COPRO RESET that every GO pulses, so a decision starts with
+// NO target: firmware that never writes $70F5 (every pre-DRDIST image) gets the term exactly 0 on every leaf.
+reg  [7:0] lev_a_tgt = 8'd0;
+always @(posedge clk_cpu) begin
+	if (cpu_rst) lev_a_tgt <= 8'd0;
+	else if (WE && a_lev && (AB[7:0] == 8'hF5)) lev_a_tgt <= DO;
+end
+`endif
 always @(posedge clk_cpu) begin
 	if (WE && !cpu_rst && a_lev && (AB[7:0] == 8'hF3)) lev_wslot <= DO[1:0];
 	if (lev_wr_arg)
@@ -146,6 +156,9 @@ LeafEval leafeval(
 	.a_cb  (lev_a_cb),
 	.a_fix (lev_a_fix),
 	.a_chw (lev_a_chw),
+`ifdef DRDIST
+	.a_tgt (lev_a_tgt),
+`endif
 	.done  (lev_done),
 	.sco   (lev_sco),
 	.win   (lev_win),
