@@ -56,6 +56,9 @@ module LeafEval(
 	input       [1:0] a_cb,
 	input             a_fix,       // 0 = stop after one clear round (lnk1 arm)
 	                               // 1 = resolve to fixpoint, counting rounds (chain arm)
+`ifdef DRDIST
+	input       [7:0] a_tgt,       // DRDIST: endgame target virus, bit7 valid, [6:0] = r*8+c (0 = no target)
+`endif
 	input       [7:0] a_chw,       // DRCHAIN dose / 4. imm gains a_chw*4*(chain-1) when
 	                               // chain > 1, mirroring cascade_chain_x._imm_chain.
 	                               // 0 reproduces the no-reward arms EXACTLY (the term
@@ -437,6 +440,126 @@ reg  [4:0] run_h, run_v;       // same-color runs through the virus
 // margin is exactly 2 clk on the delta path and this 1-deep copy sits inside it.
 reg  [4:0] sq_h_in, sq_v_in;
 always @(posedge clk) begin sq_h_in <= run_h; sq_v_in <= run_v; end
+`endif
+`ifdef DRDIST
+`ifndef DRHSV
+DRDIST_requires_DRHSV the_signed_15_bit_matched60_path();   // compile-time guard: the penalty rides DRHSV's signed matched60
+`endif
+// ====================================================================================================================
+// DRDIST (STEER6b dist_target60, 2026-09-28): leaf term -60 * D(target), D = the target virus's CLEARING DISTANCE
+// (cascade_leaf6_x._vdist, cap 16, kdig 0): min over the horizontal/vertical windows of 4 through the target of the
+// cells still to build -- a same-colour cell costs 0, an empty cell reachable from above costs 1 + its support gap
+// (horizontal) or 1 (vertical, above the virus), anything else (wrong colour, a cavity under an overhang, an empty cell
+// BELOW the virus) makes the window infeasible. The firmware picks the target once per decision (root <= 4 viruses,
+// smallest D, ties lowest index) and writes it to a_tgt; a_tgt = 0 (no target) or a target that is no longer a virus
+// in the leaf board gives exactly 0.
+// ZERO ADDED CYCLES. Nothing in the main FSM waits for it:
+//   * FULL leaves (LEAF / NODE): a 1-deep pipeline copies each S_COLWALK cell (the walk's existing mux output) into
+//     the target's ROW (8 cells), COLUMN (16 cells) and the 8 column TOPS; when the walk ends a ~20-cycle D-FSM runs
+//     alongside the >= 128-cycle per-virus/setup scans.
+//   * DELTA leaves (CMD 7): the CMD 6 BASE walk's latches are kept (b_*); S_DNEW patches in the two placed cells
+//     (a non-clearing child differs from its parent in exactly those) and the D-FSM runs alongside the 48-cycle
+//     pollution scan.
+//   * The penalty folds in at the ONE site S_DONE already registers matched60 -> matched60_p; S_DONE2 is unchanged.
+// ====================================================================================================================
+reg  [1:0] dw_col; reg dw_vir, dw_v; reg [3:0] dw_r; reg [2:0] dw_c;      // walk-cell pipeline (1 deep)
+reg  [1:0] dt_row [0:7];  reg [1:0] dt_colv [0:15]; reg [4:0] dt_top [0:7];   // working latches (this leaf)
+reg        dt_tvir; reg [1:0] dt_tcol;
+reg  [1:0] b_row  [0:7];  reg [1:0] b_colv  [0:15]; reg [4:0] b_top  [0:7];   // CMD 6 base copies (delta parent)
+reg        b_tvir;  reg [1:0] b_tcol;
+reg        dt_fin;                              // the walk's last cell lands in the latches this edge
+reg  [4:0] dq;                                  // D-FSM step (0 = idle)
+reg  [4:0] dh_v [0:7];  reg dh_i [0:7];         // per-column horizontal cell cost (value, infeasible)
+reg        dv_v [0:15]; reg dv_i [0:15];        // per-row vertical cell cost (0/1, infeasible)
+reg  [3:0] dsw;                                 // window start being evaluated
+reg  [4:0] dbest;                               // running min, starts at the cap (16)
+reg  [9:0] dt_pen /*verilator public_flat_rd*/; // 60 * D, 0..960 (0 when no valid target / target not a virus)
+wire [10:0] pen60 = {dbest, 6'd0} - {4'd0, dbest, 2'd0};   // 60*D = 64D - 4D (<= 960, no DSP)
+wire [3:0] tg_r = a_tgt[6:3];
+wire [2:0] tg_c = a_tgt[2:0];
+integer di;
+always @(posedge clk) begin
+	// ---- walk-cell pipeline: register the S_COLWALK cell (one extra load on the walk's existing mux) ----
+	dw_v <= (st == S_COLWALK); dw_r <= wr_; dw_c <= wc[2:0];
+	dw_col <= col_of[{wr_[3:0], wc[2:0]}]; dw_vir <= vir_of[{wr_[3:0], wc[2:0]}];
+	dt_fin <= dw_v && dw_r == 4'd15 && dw_c == 3'd7;
+	if (dw_v) begin
+		// column top: the walk is row-major WITHIN a column, so row 0 of each column re-initialises it
+		if (dw_r == 4'd0)                                   dt_top[dw_c] <= (dw_col != 2'd0) ? 5'd0 : 5'd16;
+		else if (dt_top[dw_c] == 5'd16 && dw_col != 2'd0)  dt_top[dw_c] <= {1'b0, dw_r};
+		if (dw_r == tg_r) dt_row[dw_c]  <= dw_col;
+		if (dw_c == tg_c) dt_colv[dw_r] <= dw_col;
+		if (dw_r == tg_r && dw_c == tg_c) begin dt_tvir <= dw_vir; dt_tcol <= dw_col; end
+	end
+	// ---- start: walk finished (latches final) or a delta child entered S_DNEW ----
+	if (dt_fin) begin
+		if (base_mode) begin                                // CMD 6: keep the parent's latches for its children
+			for (di = 0; di < 8; di = di + 1)  begin b_row[di] <= dt_row[di]; b_top[di] <= dt_top[di]; end
+			for (di = 0; di < 16; di = di + 1) b_colv[di] <= dt_colv[di];
+			b_tvir <= dt_tvir; b_tcol <= dt_tcol;
+		end else begin
+			dq <= 5'd2; dt_pen <= 10'd0;
+		end
+	end else if (st == S_DNEW) begin                       // child = base + the two placed cells (non-clearing)
+		for (di = 0; di < 8; di = di + 1) begin
+			dt_row[di] <= (off_a[6:3] == tg_r && off_a[2:0] == di[2:0]) ? pca
+			            : (off_b[6:3] == tg_r && off_b[2:0] == di[2:0]) ? pcb : b_row[di];
+			dt_top[di] <= (off_a[2:0] == di[2:0] && {1'b0, off_a[6:3]} < b_top[di]
+			               && !(off_b[2:0] == di[2:0] && off_b[6:3] < off_a[6:3])) ? {1'b0, off_a[6:3]}
+			            : (off_b[2:0] == di[2:0] && {1'b0, off_b[6:3]} < b_top[di]) ? {1'b0, off_b[6:3]} : b_top[di];
+		end
+		for (di = 0; di < 16; di = di + 1)
+			dt_colv[di] <= (off_a[2:0] == tg_c && off_a[6:3] == di[3:0]) ? pca
+			             : (off_b[2:0] == tg_c && off_b[6:3] == di[3:0]) ? pcb : b_colv[di];
+		dt_tvir <= b_tvir; dt_tcol <= b_tcol;
+		dq <= 5'd2; dt_pen <= 10'd0;
+	end else begin
+		case (dq)
+		5'd0: ;
+		5'd2: begin                                         // per-cell costs, all from registers
+			for (di = 0; di < 8; di = di + 1) begin
+				if (dt_row[di] == dt_tcol)          begin dh_v[di] <= 5'd0; dh_i[di] <= 1'b0; end
+				else if (dt_row[di] != 2'd0)        begin dh_v[di] <= 5'd0; dh_i[di] <= 1'b1; end   // wrong colour
+				else if ({1'b0, tg_r} >= dt_top[di]) begin dh_v[di] <= 5'd0; dh_i[di] <= 1'b1; end   // cavity
+				else begin dh_v[di] <= dt_top[di] - {1'b0, tg_r}; dh_i[di] <= 1'b0; end          // 1 + support gap
+			end
+			for (di = 0; di < 16; di = di + 1) begin
+				if (dt_colv[di] == dt_tcol)              begin dv_v[di] <= 1'b0; dv_i[di] <= 1'b0; end
+				else if (di[3:0] > tg_r)                 begin dv_v[di] <= 1'b0; dv_i[di] <= 1'b1; end // below: never
+				else if (dt_colv[di] != 2'd0)            begin dv_v[di] <= 1'b0; dv_i[di] <= 1'b1; end // wrong colour
+				else if ({1'b0, di[3:0]} >= dt_top[tg_c]) begin dv_v[di] <= 1'b0; dv_i[di] <= 1'b1; end // overhang
+				else                                     begin dv_v[di] <= 1'b1; dv_i[di] <= 1'b0; end
+			end
+			dbest <= 5'd16; dsw <= 4'd0; dq <= 5'd3;
+		end
+		5'd3: begin : dhw                                   // horizontal windows s = 0..4 through tg_c
+			reg [6:0] sum; reg inf;
+			sum = {2'd0, dh_v[dsw[2:0]]} + {2'd0, dh_v[dsw[2:0] + 3'd1]} + {2'd0, dh_v[dsw[2:0] + 3'd2]}
+			    + {2'd0, dh_v[dsw[2:0] + 3'd3]};
+			inf = dh_i[dsw[2:0]] | dh_i[dsw[2:0] + 3'd1] | dh_i[dsw[2:0] + 3'd2] | dh_i[dsw[2:0] + 3'd3];
+			if (dsw[2:0] <= tg_c && dsw[2:0] + 3'd3 >= tg_c && !inf && sum < {2'd0, dbest}) dbest <= sum[4:0];
+			if (dsw == 4'd4) begin dsw <= 4'd0; dq <= 5'd4; end else dsw <= dsw + 4'd1;
+		end
+		5'd4: begin : dvw                                   // vertical windows s = 0..12 through tg_r
+			reg [2:0] sum; reg inf;
+			sum = {2'd0, dv_v[dsw]} + {2'd0, dv_v[dsw + 4'd1]} + {2'd0, dv_v[dsw + 4'd2]} + {2'd0, dv_v[dsw + 4'd3]};
+			inf = dv_i[dsw] | dv_i[dsw + 4'd1] | dv_i[dsw + 4'd2] | dv_i[dsw + 4'd3];
+			if (dsw <= tg_r && dsw + 4'd3 >= tg_r && !inf && {2'd0, sum} < dbest) dbest <= {2'd0, sum};
+			if (dsw == 4'd12) dq <= 5'd5; else dsw <= dsw + 4'd1;
+		end
+		5'd5: begin                                         // 60*D = 64D - 4D; 0 without a live target virus
+			dt_pen <= (a_tgt[7] && dt_tvir) ? pen60[9:0] : 10'd0;
+			dq <= 5'd0;
+		end
+		default: dq <= 5'd0;
+		endcase
+	end
+end
+`ifdef VERILATOR
+// Simulation-only witness of the zero-cycle claim: the penalty must be final whenever S_DONE registers it.
+reg [31:0] dt_late /*verilator public_flat_rd*/;
+always @(posedge clk) if (rst) dt_late <= 0; else if (st == S_DONE && !base_mode && (dq != 5'd0 || dt_fin)) dt_late <= dt_late + 1;
+`endif
 `endif
 reg  [4:0] p;                  // walk pointer (row 0..15 or col 0..7 as needed)
 reg  [4:0] span_lo, span_hi;   // span bounds (exclusive), horizontal: -1..8 as 5-bit signed-ish
@@ -1023,7 +1146,12 @@ always @(posedge clk) begin
 				win <= !anyvir; done <= 1'b1; base_mode <= 1'b0; st <= S_IDLE;
 			end else begin
 				maxh_p <= maxh; holes_p <= holes; toprisk_p <= toprisk; spawn_p <= spawn; setup_p <= setup;
+`ifdef DRDIST
+				pollution_p <= pollution; buried_p <= buried; rdy_ext_p <= rdy_ext; vrdy_p <= vrdy;
+				matched60_p <= matched60 - {5'd0, dt_pen};    // DRDIST: -60*D(target) rides matched60 (S_DONE2 unchanged)
+`else
 				pollution_p <= pollution; buried_p <= buried; rdy_ext_p <= rdy_ext; vrdy_p <= vrdy; matched60_p <= matched60;
+`endif
 				win  <= !anyvir;
 				st <= S_DONE2;
 			end
